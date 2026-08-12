@@ -1,4 +1,9 @@
-const TARGET_CHARS: usize = 2000;
+// Lemonade's embedding backend rejects any single input over 512 tokens. Plain
+// English prose runs roughly 4 chars/token, so 2000 chars sat right at that ceiling
+// with no margin; punctuation- or escape-dense text (JSON, minified code) can run
+// under 2.5 chars/token, well past it. 1400 leaves real headroom for ordinary text;
+// rag.rs's resilient embed-and-split retry is the actual backstop for anything denser.
+const TARGET_CHARS: usize = 1400;
 const OVERLAP_CHARS: usize = 250;
 const MAX_LINE_CHUNK_CHARS: usize = 4000;
 

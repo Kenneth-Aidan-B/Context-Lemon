@@ -19,6 +19,61 @@ struct EmbeddingData {
     index: Option<usize>,
 }
 
+/// Lemonade sometimes reports an application-level failure — e.g. a chunk that
+/// tokenizes past the backend's batch-size limit — with an HTTP 200 and an
+/// `{"error": {...}}` body instead of a non-2xx status. A 200 is therefore not proof
+/// the body matches `EmbeddingsResponse`; this shape has to be checked for either way.
+#[derive(Debug, Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorDetail {
+    message: String,
+}
+
+/// Marks an embed() error as "this specific input was rejected for being too large" —
+/// as opposed to a connectivity/model/server failure — so callers can retry with a
+/// smaller input instead of giving up. A plain string prefix (rather than a proper
+/// error enum) matches the rest of this codebase's convention of `Result<_, String>`.
+pub const EMBED_TOO_LARGE_PREFIX: &str = "EMBED_TOO_LARGE:";
+
+/// Pulled out of `embed()` as a pure function so the exact response shapes Lemonade is
+/// known to send — success, error-in-a-200, and a genuine non-2xx — can be tested
+/// directly without spinning up an HTTP server.
+fn parse_embeddings_response(
+    body: &str,
+    status: reqwest::StatusCode,
+    expected_len: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    match serde_json::from_str::<EmbeddingsResponse>(body) {
+        Ok(parsed) => {
+            let mut ordered: Vec<Vec<f32>> = vec![Vec::new(); expected_len];
+            for (pos, item) in parsed.data.into_iter().enumerate() {
+                let idx = item.index.unwrap_or(pos);
+                if idx < ordered.len() {
+                    ordered[idx] = item.embedding;
+                }
+            }
+            Ok(ordered)
+        }
+        Err(parse_err) => match serde_json::from_str::<ErrorEnvelope>(body) {
+            Ok(envelope) if envelope.error.message.to_lowercase().contains("too large") => {
+                Err(format!("{EMBED_TOO_LARGE_PREFIX}{}", envelope.error.message))
+            }
+            Ok(envelope) => Err(format!(
+                "embeddings request failed ({status}): {}",
+                envelope.error.message
+            )),
+            Err(_) if status.is_success() => Err(format!(
+                "failed to parse embeddings response ({status}): {parse_err}"
+            )),
+            Err(_) => Err(format!("embeddings request returned {status}: {body}")),
+        },
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
@@ -57,25 +112,13 @@ impl LemonadeClient {
             .await
             .map_err(|e| format!("embeddings request failed: {e}"))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("embeddings request returned {status}: {body}"));
-        }
-
-        let parsed: EmbeddingsResponse = resp
-            .json()
+        let status = resp.status();
+        let body = resp
+            .text()
             .await
-            .map_err(|e| format!("failed to parse embeddings response: {e}"))?;
+            .map_err(|e| format!("failed to read embeddings response: {e}"))?;
 
-        let mut ordered: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
-        for (pos, item) in parsed.data.into_iter().enumerate() {
-            let idx = item.index.unwrap_or(pos);
-            if idx < ordered.len() {
-                ordered[idx] = item.embedding;
-            }
-        }
-        Ok(ordered)
+        parse_embeddings_response(&body, status, texts.len())
     }
 
     pub async fn chat(&self, model: &str, system: &str, user: &str, no_think: bool) -> Result<String, String> {
@@ -241,5 +284,47 @@ mod tests {
     fn genuinely_empty_content_stays_empty_so_the_caller_can_error() {
         assert_eq!(strip_thinking(""), "");
         assert_eq!(strip_thinking("<think></think>"), "");
+    }
+
+    #[test]
+    fn parses_a_normal_successful_response() {
+        let body = r#"{"data":[{"embedding":[0.1,0.2],"index":0,"object":"embedding"}],"model":"m","object":"list","usage":{}}"#;
+        let result = parse_embeddings_response(body, reqwest::StatusCode::OK, 1).unwrap();
+        assert_eq!(result, vec![vec![0.1, 0.2]]);
+    }
+
+    /// The exact regression: Lemonade rejected a 2093-char / 888-token config file
+    /// with an HTTP 200 and this body, which `resp.json::<EmbeddingsResponse>()`
+    /// used to fail on with an opaque "error decoding response body" — no indication
+    /// anywhere that the real problem was chunk size, not a malformed response.
+    #[test]
+    fn error_wrapped_in_http_200_is_detected_and_labelled_too_large() {
+        let body = r#"{"error":{"code":500,"details":{"backend":"llama-server","response":{"error":{"code":500,"message":"input (888 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}},"message":"input (888 tokens) is too large to process. increase the physical batch size (current batch size: 512)","status_code":500,"type":"server_error"}}"#;
+        let err = parse_embeddings_response(body, reqwest::StatusCode::OK, 1).unwrap_err();
+        assert!(
+            err.starts_with(EMBED_TOO_LARGE_PREFIX),
+            "expected the too-large marker, got: {err}"
+        );
+        assert!(err.contains("888 tokens"), "expected the real message preserved, got: {err}");
+    }
+
+    #[test]
+    fn error_in_200_that_is_not_a_size_problem_is_not_mislabelled() {
+        let body = r#"{"error":{"message":"model not found","code":404}}"#;
+        let err = parse_embeddings_response(body, reqwest::StatusCode::OK, 1).unwrap_err();
+        assert!(!err.starts_with(EMBED_TOO_LARGE_PREFIX));
+        assert!(err.contains("model not found"));
+    }
+
+    #[test]
+    fn genuine_non_2xx_without_json_body_still_reports_the_raw_body() {
+        let err = parse_embeddings_response(
+            "internal server error",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            1,
+        )
+        .unwrap_err();
+        assert!(err.contains("internal server error"));
+        assert!(!err.starts_with(EMBED_TOO_LARGE_PREFIX));
     }
 }

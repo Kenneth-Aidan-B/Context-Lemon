@@ -45,7 +45,12 @@ fn run(app: tauri::AppHandle) -> notify::Result<()> {
     })?;
 
     let mut watched: HashMap<String, String> = HashMap::new();
-    sync_watches(&app, &mut watcher, &mut watched);
+    // Folders that don't currently exist on disk (deleted, unplugged drive, or a
+    // resource path that was valid at seed time but is gone after a rebuild). Without
+    // this, a folder that can never be watched gets retried — and its failure
+    // re-logged — every SYNC_INTERVAL, forever.
+    let mut missing: HashSet<String> = HashSet::new();
+    sync_watches(&app, &mut watcher, &mut watched, &mut missing);
 
     let mut pending: HashSet<PathBuf> = HashSet::new();
     loop {
@@ -73,10 +78,10 @@ fn run(app: tauri::AppHandle) -> notify::Result<()> {
                     });
                 }
                 pending.clear();
-                sync_watches(&app, &mut watcher, &mut watched);
+                sync_watches(&app, &mut watcher, &mut watched, &mut missing);
             }
             Err(RecvTimeoutError::Timeout) => {
-                sync_watches(&app, &mut watcher, &mut watched);
+                sync_watches(&app, &mut watcher, &mut watched, &mut missing);
             }
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
@@ -110,6 +115,7 @@ fn sync_watches(
     app: &tauri::AppHandle,
     watcher: &mut RecommendedWatcher,
     watched: &mut HashMap<String, String>,
+    missing: &mut HashSet<String>,
 ) {
     let folders = configured_folders(app);
     let desired: HashSet<String> = folders.iter().map(|f| path_key(f)).collect();
@@ -119,12 +125,22 @@ fn sync_watches(
         if watched.contains_key(&key) {
             continue;
         }
+
+        // A cheap existence check first, so a folder that's gone (deleted, unplugged
+        // drive, a stale resource path from before a rebuild) costs one stat call per
+        // sync instead of a failed watcher.watch() plus a repeated log line, forever.
+        if !Path::new(folder).exists() {
+            if missing.insert(key) {
+                eprintln!("cannot watch {folder}: path does not exist (will retry if it appears)");
+            }
+            continue;
+        }
+        missing.remove(&key);
+
         match watcher.watch(Path::new(folder), RecursiveMode::Recursive) {
             Ok(()) => {
                 watched.insert(key, folder.clone());
             }
-            // A folder that has been unplugged or deleted simply cannot be watched;
-            // retry on the next sync rather than killing the watcher thread.
             Err(err) => eprintln!("could not watch {folder}: {err}"),
         }
     }
@@ -139,4 +155,5 @@ fn sync_watches(
             let _ = watcher.unwatch(Path::new(&original));
         }
     }
+    missing.retain(|k| desired.contains(k));
 }

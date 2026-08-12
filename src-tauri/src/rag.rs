@@ -1,6 +1,7 @@
 use crate::indexing::chunker;
 use crate::indexing::store::{hash_content, unix_time, NewChunk, VectorStore};
 use crate::indexing::walker;
+use crate::lemonade;
 use crate::lemonade::LemonadeClient;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -19,6 +20,14 @@ const TOP_K: usize = 5;
 /// Persist at most this often during a run, so a long index is not lost on a crash
 /// but we still avoid rewriting the whole index once per file.
 const FLUSH_EVERY_N_FILES: usize = 50;
+/// How many times a single chunk may be halved before it's given up on rather than
+/// embedded. 2^6 = 64-way split of a ~1400-char chunk bottoms out well under the
+/// 200-char floor below, so this is never the binding constraint in practice.
+const MAX_SPLIT_DEPTH: u32 = 6;
+/// Below this, a chunk is judged unsplittable-usefully — a fragment this short is not
+/// worth the extra round trip, and if it's *still* rejected as too large at this size,
+/// something other than length is wrong, so retrying smaller pieces won't help.
+const MIN_SPLIT_CHARS: usize = 200;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct IndexStats {
@@ -115,8 +124,24 @@ pub async fn index_folder(
         let mut dropped = 0usize;
         for batch in spans.chunks(EMBED_BATCH_SIZE) {
             let texts: Vec<String> = batch.iter().map(|s| s.text.clone()).collect();
-            let embeddings = client.embed(&texts, EMBEDDING_MODEL).await?;
-            for (span, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            let embedded: Vec<(chunker::ChunkSpan, Vec<f32>)> =
+                match client.embed(&texts, EMBEDDING_MODEL).await {
+                    Ok(embeddings) => batch.iter().cloned().zip(embeddings).collect(),
+                    // One dense chunk (e.g. escape-heavy JSON) tokenizing past the
+                    // backend's limit must not sink the other 31 in this batch, or —
+                    // since this whole function bails via `?` — every file behind it
+                    // in the folder. Fall back to one request per chunk so only the
+                    // oversized one needs the slower, splitting path.
+                    Err(e) if e.starts_with(lemonade::EMBED_TOO_LARGE_PREFIX) => {
+                        let mut resolved = Vec::with_capacity(batch.len());
+                        for span in batch {
+                            resolved.extend(embed_span_resilient(client, span.clone()).await?);
+                        }
+                        resolved
+                    }
+                    Err(e) => return Err(e),
+                };
+            for (span, embedding) in embedded {
                 if embedding.is_empty() {
                     dropped += 1;
                     continue;
@@ -124,7 +149,7 @@ pub async fn index_folder(
                 new_chunks.push(NewChunk {
                     start_line: span.start_line,
                     end_line: span.end_line,
-                    text: span.text.clone(),
+                    text: span.text,
                     embedding,
                 });
             }
@@ -167,6 +192,69 @@ pub async fn index_folder(
         files_failed,
         cancelled: false,
     })
+}
+
+/// Embed one chunk, halving and retrying it if Lemonade rejects it as too large,
+/// until it fits or [`MAX_SPLIT_DEPTH`]/[`MIN_SPLIT_CHARS`] is reached. Returns one
+/// entry per surviving fragment; a fragment that still won't fit even at the floor
+/// comes back with an empty embedding, which the caller already treats as "drop this
+/// one and leave the file's fingerprint stale so the next run retries it" — the same
+/// path used for an embedding that came back empty for any other reason.
+///
+/// An explicit work stack rather than recursion: `async fn` can't call itself directly
+/// (the resulting future would have unbounded size), and boxing each recursive call
+/// is more ceremony than this needs.
+async fn embed_span_resilient(
+    client: &LemonadeClient,
+    span: chunker::ChunkSpan,
+) -> Result<Vec<(chunker::ChunkSpan, Vec<f32>)>, String> {
+    let mut pending: Vec<(chunker::ChunkSpan, u32)> = vec![(span, 0)];
+    let mut out = Vec::new();
+
+    while let Some((piece, depth)) = pending.pop() {
+        match client.embed(&[piece.text.clone()], EMBEDDING_MODEL).await {
+            Ok(mut embeddings) => {
+                let embedding = embeddings.pop().unwrap_or_default();
+                out.push((piece, embedding));
+            }
+            Err(e) if e.starts_with(lemonade::EMBED_TOO_LARGE_PREFIX) => {
+                if depth < MAX_SPLIT_DEPTH && piece.text.len() > MIN_SPLIT_CHARS {
+                    let (left, right) = split_span(&piece);
+                    pending.push((right, depth + 1));
+                    pending.push((left, depth + 1));
+                } else {
+                    out.push((piece, Vec::new()));
+                }
+            }
+            // A real connectivity/model/server failure — propagate it. Retrying a
+            // smaller piece would not fix an unreachable server.
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Bisect a chunk's text at a UTF-8-safe byte boundary near its midpoint. Both halves
+/// keep the parent's line range — an acceptable loss of precision, since citations
+/// already report whole-chunk line ranges rather than exact character offsets.
+fn split_span(span: &chunker::ChunkSpan) -> (chunker::ChunkSpan, chunker::ChunkSpan) {
+    let mut boundary = span.text.len() / 2;
+    while boundary < span.text.len() && !span.text.is_char_boundary(boundary) {
+        boundary += 1;
+    }
+    let (left_text, right_text) = span.text.split_at(boundary);
+    (
+        chunker::ChunkSpan {
+            text: left_text.to_string(),
+            start_line: span.start_line,
+            end_line: span.end_line,
+        },
+        chunker::ChunkSpan {
+            text: right_text.to_string(),
+            start_line: span.start_line,
+            end_line: span.end_line,
+        },
+    )
 }
 
 #[derive(Debug, Serialize, Clone)]
