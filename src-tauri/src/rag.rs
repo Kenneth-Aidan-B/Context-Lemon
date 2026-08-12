@@ -9,7 +9,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const EMBEDDING_MODEL: &str = "nomic-embed-text-v1-GGUF";
-pub const CHAT_MODEL: &str = "Qwen3-1.7B-GGUF";
+/// unsloth/Qwen3-0.6B-GGUF:Q4_0 — Q4_0 is llama.cpp's direct 4-bit (INT4) quant, no
+/// GPU required. Chosen over the 1.2B+ LFM2 family for footprint: it needs no extra
+/// download on a machine that already has it, and it's under half the size of
+/// Qwen3-1.7B-GGUF, which cuts both resident memory and cold-load time.
+pub const CHAT_MODEL: &str = "Qwen3-0.6B-GGUF";
 const EMBED_BATCH_SIZE: usize = 32;
 const TOP_K: usize = 5;
 /// Persist at most this often during a run, so a long index is not lost on a crash

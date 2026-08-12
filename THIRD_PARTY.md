@@ -45,7 +45,7 @@ server.
 ## Not redistributed
 
 - **Lemonade Server** — installed separately by the user.
-- **Models** (`nomic-embed-text-v1-GGUF`, `Qwen3-1.7B-GGUF`) — pulled by the user
+- **Models** (`nomic-embed-text-v1-GGUF`, `Qwen3-0.6B-GGUF`) — pulled by the user
   through Lemonade. Their own licences apply and are not restated here.
 
 ## Bundled content

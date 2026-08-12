@@ -33,7 +33,7 @@ retrieval, and grounding — the parts Lemonade deliberately leaves to you.
 1. Install [Lemonade Server](https://lemonade-server.ai/) and pull the two models:
    ```powershell
    lemonade pull nomic-embed-text-v1-GGUF   # embeddings, 768-dim, 74 MB
-   lemonade pull Qwen3-1.7B-GGUF            # generation, 1.0 GB
+   lemonade pull Qwen3-0.6B-GGUF            # generation, Q4_0 (4-bit), 356 MB
    ```
 2. Run the installer from Releases.
 3. Launch it. On first run it registers a bundled 4-file sample corpus
@@ -43,7 +43,7 @@ retrieval, and grounding — the parts Lemonade deliberately leaves to you.
 Ask: *"What port does the Nightingale gateway listen on by default?"*
 
 ```
-The Nightingale gateway listens on port 7913 by default [Source 1].
+The Nightingale gateway listens on port 7913 by default.
 
 Sources
   sample\faq.md          (lines 1-21)
@@ -53,7 +53,10 @@ Sources
 ```
 
 That is real output, printed by `cargo test --test rag_quality -- --nocapture`, not a
-mock-up. `faq.md` ranks first because it is where the port is documented.
+mock-up. `faq.md` ranks first because it is where the port is documented. The system
+prompt asks for inline `[Source N]` markers; Qwen3-0.6B-GGUF sometimes omits them even
+though it retrieves and answers correctly — the citation list itself is what's
+authoritative, not the inline marker, so this doesn't affect grounding.
 
 The citation is the product. An answer you can't trace isn't useful.
 
@@ -85,18 +88,31 @@ it is readable off the screen rather than taken on trust.
 
 ## Hardware
 
-Lemonade picks the inference backend; this app only sizes its own work. Measured on the
-development machine:
+**Lemonade auto-selects its own backend — this app does nothing hardware-specific.**
+Every Lemonade engine (`llamacpp` included) defaults to `backend = auto`
+(`lemonade config`): if a GPU is present it installs and runs the CUDA/ROCm/Vulkan
+backend for it; with no GPU it falls back to CPU. Verified on this machine — before any
+of this project's code runs, `lemonade backends` already shows `llamacpp cuda
+installed`, auto-selected because it found the RTX 3050. No config on the app's side
+switches this; Lemonade decided before the first request arrived.
+
+The default chat model, **Qwen3-0.6B-GGUF** (`unsloth/Qwen3-0.6B-GGUF:Q4_0` — genuine
+4-bit, llama.cpp's direct INT4 quant), was chosen for exactly this reason: it needs no
+GPU to be fast, so the app stays usable on CPU-only hardware, not just on whatever the
+development machine happens to have.
+
+Measured with `lemonade bench Qwen3-0.6B-GGUF --scenarios chat`:
 
 | Spec | Value |
 |---|---|
 | RAM | 16 GB |
-| GPU | NVIDIA RTX 3050 6 GB (laptop) |
+| GPU | NVIDIA RTX 3050 6 GB (laptop), auto-selected by Lemonade |
 | NPU | none |
-| Generation | ~104 tok/s (Qwen3-1.7B-GGUF) |
+| Generation | 213–215 tok/s |
+| Time to first token | 39–62 ms |
 
-Model choice is currently fixed. Hardware-tiered model selection is not implemented —
-see [Status](#status).
+Model *choice* (which model, not which device) is currently fixed rather than tiered
+by detected RAM/VRAM — see [Status](#status).
 
 ## Behaviour worth knowing
 
