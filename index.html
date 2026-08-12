@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lemonade Context Engine</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="container">
+      <h1>Lemonade Context Engine</h1>
+      <p class="subtitle">A folder-aware AI brain for Lemonade — 100% offline.</p>
+
+      <section>
+        <h2>Watched Folders</h2>
+        <ul id="folder-list"></ul>
+        <button id="add-folder-btn" type="button">+ Add Folder</button>
+        <p id="index-status"></p>
+      </section>
+
+      <section>
+        <h2>Ask</h2>
+        <form id="ask-form" class="ask-form">
+          <input id="ask-input" placeholder="Ask something about your files…" autocomplete="off" />
+          <button type="submit" id="ask-submit">Ask</button>
+        </form>
+        <div id="answer-box" class="answer-box" hidden>
+          <p id="answer-text"></p>
+          <ul id="sources-list"></ul>
+        </div>
+      </section>
+
+      <section>
+        <h2>Status</h2>
+        <p id="status-msg">Not connected to Lemonade yet.</p>
+      </section>
+    </main>
+  </body>
+</html>
