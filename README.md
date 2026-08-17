@@ -64,6 +64,28 @@ automatically. Ask:
 The expected answer is port `7913`, with `sample/faq.md` ranked among the citations.
 This is a real quality-test case, not a hard-coded response.
 
+## Supported files and limits
+
+Context-Lemon currently indexes UTF-8 text files with the following extensions:
+
+`md`, `markdown`, `txt`, `rst`, `json`, `yaml`, `yml`, `toml`, `rs`, `py`, `js`,
+`jsx`, `ts`, `tsx`, `go`, `java`, `c`, `h`, `cpp`, `hpp`, `cs`, `rb`, `php`,
+`html`, `css`, `scss`, `sh`, `ps1`, `sql`, and `xml`.
+
+### Current limits
+
+- Maximum indexed file size: **5 MiB per file**
+- Binary, unreadable, and non-UTF-8 files are skipped
+- `.gitignore`, global Git ignore rules, and repository exclude rules are respected
+- Common dependency, build, and editor directories are excluded, including `.git`,
+  `node_modules`, `target`, `dist`, `build`, `.next`, `vendor`, `__pycache__`,
+  `.venv`, `venv`, `.idea`, and `.vscode`
+- PDF, DOCX, PPTX, XLSX, image, audio, and video ingestion is not supported
+- Files are indexed incrementally; unchanged content is not re-embedded
+- Changes inside watched folders trigger automatic re-indexing after a short debounce
+- Chunking targets approximately 1,400 characters with about 250 characters of
+  overlap; long lines and oversized embedding inputs are split automatically
+
 ## Architecture
 
 ```mermaid
