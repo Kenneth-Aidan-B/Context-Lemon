@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Kenneth-Aidan-B/Context-Lemon/actions/workflows/ci.yml/badge.svg)](https://github.com/Kenneth-Aidan-B/Context-Lemon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#run-it)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#quick-start)
 [![AI: 100% local](https://img.shields.io/badge/AI-100%25_local-5A45FF.svg)](#privacy-boundary)
 
 **Give Lemonade private memory over your local files.**
@@ -14,9 +14,6 @@ the cloud.
 
 > **The citation is the product.** An answer you cannot trace back to the source is
 > not useful.
-
-**Submission resources:** [90-second demo script](docs/demo-script.md) ·
-[release and submission checklist](docs/submission-checklist.md)
 
 ## Built for the AMD x Lemonade Developer Challenge
 
@@ -35,45 +32,37 @@ retrieval, prompt grounding, and citations around those calls.
 The project targets the
 [AMD x Lemonade Developer Challenge](https://www.amd.com/en/developer/resources/technical-articles/2026/join-the-lemonade-developer-challenge.html).
 
-## Run it
+## Quick start
 
 ### Prerequisites
 
 - Windows 10 or 11
 - [Lemonade Server](https://lemonade-server.ai/)
-- Node.js 20 or newer
-- The stable Rust toolchain and Tauri's Windows prerequisites
 
-Pull the two models used by the application:
+Install and start Lemonade Server, then pull the two models used by Context-Lemon:
 
 ```powershell
 lemonade pull nomic-embed-text-v1-GGUF
 lemonade pull Qwen3-0.6B-GGUF
 ```
 
-Then run Context-Lemon from source:
+Download the latest Windows executable from
+[Context-Lemon v0.1.0](https://github.com/Kenneth-Aidan-B/Context-Lemon/releases/tag/v0.1.0)
+and launch it. The current executable is unsigned, so Windows may display a
+SmartScreen warning. Lemonade Server and the models are installed separately and are
+not bundled with the application.
 
-```powershell
-git clone https://github.com/Kenneth-Aidan-B/Context-Lemon.git
-cd Context-Lemon
-npm ci
-npm run tauri dev
-```
+To run from source instead, see [Build from source](#build-from-source).
 
-The first launch registers the bundled four-file **Project Nightingale** sample and
-indexes it automatically. Ask:
+### Try the bundled demo
+
+The first launch registers and indexes the four-file **Project Nightingale** sample
+automatically. Ask:
 
 > What port does the Nightingale gateway listen on by default?
 
 The expected answer is port `7913`, with `sample/faq.md` ranked among the citations.
 This is a real quality-test case, not a hard-coded response.
-
-### Windows download
-
-Download [Context-Lemon v0.1.0](https://github.com/Kenneth-Aidan-B/Context-Lemon/releases/tag/v0.1.0)
-or use the source workflow above. The standalone Windows executable is currently an
-unsigned preview, so Windows may show a SmartScreen warning. Lemonade Server and the
-two models listed above must be installed separately.
 
 ## Architecture
 
@@ -188,7 +177,7 @@ CPU, GPU, or NPU backend; the application uses the same local HTTP API in every 
 The default 4-bit `Qwen3-0.6B-GGUF` model was chosen to remain useful on CPU-only
 machines.
 
-Current development benchmark:
+Reference development benchmark:
 
 | Spec | Result |
 | --- | --- |
@@ -198,40 +187,41 @@ Current development benchmark:
 | Generation | 213–215 tok/s |
 | Time to first token | 39–62 ms |
 
-An AMD Ryzen AI or Radeon validation run is still recommended before challenge
-submission. The exact capture procedure and results table are in the
-[submission checklist](docs/submission-checklist.md).
+These figures describe the development machine and are not presented as AMD hardware
+results. Actual performance depends on the model, Lemonade backend, and device.
 
-## Build and package
+## Build from source
+
+Source builds require Node.js 20 or newer, the stable Rust toolchain, and
+[Tauri's Windows prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```powershell
+git clone https://github.com/Kenneth-Aidan-B/Context-Lemon.git
+cd Context-Lemon
 npm ci
 npm run build
-npm run tauri build
+npm run tauri dev
 ```
 
-`npm run tauri build` produces the desktop executable and attempts the configured
-Windows bundles. On the development machine, the application executable builds, but
-first-time WiX download timeouts have blocked MSI generation. The release checklist
-keeps the executable as a fallback artifact while installer generation is resolved.
+Create an optimized production build with:
 
-A no-bundle production build writes
+```powershell
+npm run tauri build -- --no-bundle
+```
+
+The production executable is written to
 `src-tauri/target/release/lemonade-context-engine.exe`; `Context-Lemon` is the
 user-facing application and bundle name.
 
-## Project status
+## Release status
 
-Implemented: tray app, folder registration, first-run sample, gitignore-aware walking,
-overlap chunking, int8 disk-backed storage, incremental and reconciling indexing, live
-file watching, retrieval, grounded generation, citations, deterministic unit tests,
-live RAG quality tests, and Windows CI.
+Version `0.1.0` includes the tray application, folder registration, first-run sample,
+gitignore-aware walking, overlap chunking, int8 disk-backed storage, incremental and
+reconciling indexing, live file watching, retrieval, grounded generation, file-and-line
+citations, deterministic unit tests, live RAG quality tests, and Windows CI.
 
-Before challenge submission:
-
-- replace the unsigned preview with a signed installer when available;
-- capture the authentic screenshots and 60–120 second demo;
-- add AMD hardware results if suitable hardware is available; and
-- optionally add hardware-aware model tiering (the current model choice is fixed).
+The downloadable Windows executable is an unsigned standalone build. Source builds
+remain fully reproducible using the commands above.
 
 ## License
 
