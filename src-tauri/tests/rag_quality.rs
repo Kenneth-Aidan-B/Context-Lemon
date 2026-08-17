@@ -6,37 +6,9 @@
 //! These tests close both gaps, and add the case that matters most for a RAG layer:
 //! refusing to answer when the corpus does not contain the answer.
 
-use lemonade_context_engine_lib::indexing::store::VectorStore;
-use lemonade_context_engine_lib::lemonade::LemonadeClient;
 use lemonade_context_engine_lib::rag;
 
-fn index_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap()
-        .join("lemonade-context-engine")
-        .join("index.bin")
-}
-
-/// Returns None (and prints why) when the live preconditions are not met, so this
-/// suite skips rather than fails on a machine without Lemonade running.
-async fn setup() -> Option<(VectorStore, LemonadeClient)> {
-    let client = LemonadeClient::new("http://localhost:13305/v1".to_string());
-    if !client.is_reachable().await {
-        eprintln!("SKIPPED: Lemonade server not reachable at localhost:13305");
-        return None;
-    }
-    let path = index_path();
-    if !path.exists() {
-        eprintln!("SKIPPED: no index at {path:?} — run the app once first");
-        return None;
-    }
-    let store = VectorStore::open(path);
-    if store.stats().1 == 0 {
-        eprintln!("SKIPPED: index is empty");
-        return None;
-    }
-    Some((store, client))
-}
+mod common;
 
 fn cited_files(sources: &[rag::Source]) -> Vec<String> {
     sources
@@ -55,14 +27,14 @@ fn cited_files(sources: &[rag::Source]) -> Vec<String> {
 /// the citation is the product here.
 #[tokio::test]
 async fn answers_are_attributed_to_the_file_that_contains_the_fact() {
-    let Some((store, client)) = setup().await else {
+    let Some(fixture) = common::setup().await else {
         return;
     };
 
     // "30 seconds with no heartbeat -> dead" appears only in architecture.md.
     let response = rag::ask(
-        &store,
-        &client,
+        &fixture.store,
+        &fixture.client,
         "After how many seconds with no heartbeat is a Nightingale node marked dead?",
     )
     .await
@@ -85,13 +57,13 @@ async fn answers_are_attributed_to_the_file_that_contains_the_fact() {
 /// more than one document and the model used both.
 #[tokio::test]
 async fn synthesises_facts_across_two_files() {
-    let Some((store, client)) = setup().await else {
+    let Some(fixture) = common::setup().await else {
         return;
     };
 
     let response = rag::ask(
-        &store,
-        &client,
+        &fixture.store,
+        &fixture.client,
         "What is the Talon Cache's default budget per accelerator, and which build introduced it?",
     )
     .await
@@ -114,13 +86,13 @@ async fn synthesises_facts_across_two_files() {
 /// figure here would be the single most damaging failure mode for this product.
 #[tokio::test]
 async fn declines_when_the_answer_is_not_in_the_corpus() {
-    let Some((store, client)) = setup().await else {
+    let Some(fixture) = common::setup().await else {
         return;
     };
 
     let response = rag::ask(
-        &store,
-        &client,
+        &fixture.store,
+        &fixture.client,
         "What was Project Nightingale's annual marketing budget in US dollars?",
     )
     .await
@@ -139,6 +111,8 @@ async fn declines_when_the_answer_is_not_in_the_corpus() {
         "doesn't mention",
         "does not contain",
         "doesn't contain",
+        "does not include",
+        "doesn't include",
         "does not provide",
         "doesn't provide",
         "does not specify",
@@ -176,13 +150,13 @@ async fn declines_when_the_answer_is_not_in_the_corpus() {
 /// 7913, and common defaults must not show up instead.
 #[tokio::test]
 async fn does_not_substitute_a_plausible_wrong_value() {
-    let Some((store, client)) = setup().await else {
+    let Some(fixture) = common::setup().await else {
         return;
     };
 
     let response = rag::ask(
-        &store,
-        &client,
+        &fixture.store,
+        &fixture.client,
         "What port does the Nightingale gateway listen on by default?",
     )
     .await

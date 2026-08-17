@@ -1,210 +1,239 @@
-# Lemonade Context Engine
+# Context-Lemon
 
-**A folder-aware memory layer for [Lemonade](https://lemonade-server.ai/) — 100% offline.**
+[![CI](https://github.com/Kenneth-Aidan-B/Context-Lemon/actions/workflows/ci.yml/badge.svg)](https://github.com/Kenneth-Aidan-B/Context-Lemon/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4.svg)](#run-it)
+[![AI: 100% local](https://img.shields.io/badge/AI-100%25_local-5A45FF.svg)](#privacy-boundary)
 
-Point it at a folder. Ask questions about what's in it. Every answer cites the file and
-line range it came from. Nothing leaves the machine.
+**Give Lemonade private memory over your local files.**
 
-> Why it matters: **it makes Lemonade dramatically easier to use.** Lemonade gives you
-> fast local inference; this gives that inference *your files* as context, without a
-> cloud vector database, an API key, or a single network request.
+Context-Lemon is a lightweight, fully local, folder-aware RAG and memory layer for
+[AMD Lemonade](https://lemonade-server.ai/). It continuously indexes local files and
+produces grounded answers with file-and-line citations—without sending documents to
+the cloud.
 
----
+> **The citation is the product.** An answer you cannot trace back to the source is
+> not useful.
 
-## What it actually is
+**Submission resources:** [90-second demo script](docs/demo-script.md) ·
+[release and submission checklist](docs/submission-checklist.md)
 
-Lemonade already exposes an OpenAI-compatible API. This app is the connective tissue
-that turns it into a retrieval-augmented system over local folders:
+## Built for the AMD x Lemonade Developer Challenge
 
+Context-Lemon turns Lemonade's OpenAI-compatible local inference API into a usable
+desktop knowledge workflow. It calls both `/v1/embeddings` and
+`/v1/chat/completions`; the application owns the file watching, incremental indexing,
+retrieval, prompt grounding, and citations around those calls.
+
+| Challenge dimension | What Context-Lemon demonstrates |
+| --- | --- |
+| Community impact | Private document Q&A that works without API keys, a cloud vector database, or uploading files |
+| Technical depth | Rust/Tauri, int8 embeddings, disk-backed chunk text, crash-safe persistence, cancellation, and model compatibility checks |
+| Creativity | A continuously updated memory layer for arbitrary local folders with exact file-and-line citations |
+| Open source | MIT-licensed source, reproducible builds, tests, and CI |
+
+The project targets the
+[AMD x Lemonade Developer Challenge](https://www.amd.com/en/developer/resources/technical-articles/2026/join-the-lemonade-developer-challenge.html).
+
+## Run it
+
+### Prerequisites
+
+- Windows 10 or 11
+- [Lemonade Server](https://lemonade-server.ai/)
+- Node.js 20 or newer
+- The stable Rust toolchain and Tauri's Windows prerequisites
+
+Pull the two models used by the application:
+
+```powershell
+lemonade pull nomic-embed-text-v1-GGUF
+lemonade pull Qwen3-0.6B-GGUF
 ```
-  folder  →  walk  →  chunk  →  /v1/embeddings  →  int8 vector store
-                                                          │
-  question  →  /v1/embeddings  →  cosine top-k  ──────────┘
-                                       │
-                                       ▼
-                        grounded prompt  →  /v1/chat/completions  →  answer + [Source N]
+
+Then run Context-Lemon from source:
+
+```powershell
+git clone https://github.com/Kenneth-Aidan-B/Context-Lemon.git
+cd Context-Lemon
+npm ci
+npm run tauri dev
 ```
 
-Both model calls go to Lemonade. This app owns the walking, chunking, storage,
-retrieval, and grounding — the parts Lemonade deliberately leaves to you.
+The first launch registers the bundled four-file **Project Nightingale** sample and
+indexes it automatically. Ask:
 
-## Install & first run
+> What port does the Nightingale gateway listen on by default?
 
-1. Install [Lemonade Server](https://lemonade-server.ai/) and pull the two models:
-   ```powershell
-   lemonade pull nomic-embed-text-v1-GGUF   # embeddings, 768-dim, 74 MB
-   lemonade pull Qwen3-0.6B-GGUF            # generation, Q4_0 (4-bit), 356 MB
-   ```
-2. Run the installer from Releases.
-3. Launch it. On first run it registers a bundled 4-file sample corpus
-   ("Project Nightingale") and indexes it automatically, so there is something to ask
-   about immediately — no setup, no network.
+The expected answer is port `7913`, with `sample/faq.md` ranked among the citations.
+This is a real quality-test case, not a hard-coded response.
 
-Ask: *"What port does the Nightingale gateway listen on by default?"*
+There is not yet a downloadable GitHub Release. Until `v0.1.0` is published, the
+source workflow above is the supported installation path. Packaging and release steps
+are tracked in the [submission checklist](docs/submission-checklist.md).
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Local["Your machine — no document data leaves it"]
+        F[Local folders] --> W[Gitignore-aware walker<br/>and file watcher]
+        W --> C[Chunking, hashing,<br/>and reconciliation]
+        C --> E[Lemonade<br/>/v1/embeddings]
+        E --> V[(Int8 vectors<br/>+ disk-backed text)]
+
+        Q[Question] --> QE[Lemonade<br/>/v1/embeddings]
+        QE --> R[Cosine top-5 retrieval]
+        V --> R
+        R --> P[Grounded prompt]
+        P --> G[Lemonade<br/>/v1/chat/completions]
+        G --> A[Answer + file and<br/>line citations]
+    end
 ```
-The Nightingale gateway listens on port 7913 by default.
 
-Sources
-  sample\faq.md          (lines 1-21)
-  sample\README.md       (lines 1-17)
-  sample\architecture.md (lines 1-29)
-  sample\changelog.md    (lines 1-23)
+Both model calls go to Lemonade. Context-Lemon does not call a hosted model, cloud
+embedding API, or remote vector database.
+
+## Why the engineering matters
+
+- **Incremental.** Re-indexing uses stable FNV-1a content hashes and skips unchanged
+  files, including files whose timestamps changed but bytes did not.
+- **Reconciling.** Deleted, renamed, newly ignored, oversized, or unreadable files are
+  purged so stale content cannot be cited.
+- **Crash-safe.** The index is written to a temporary file, synced, and renamed. A
+  failed load preserves the old data as `index.bin.corrupt` for diagnosis.
+- **Cancellable.** Removing a folder cancels in-flight work, with a second check under
+  the store lock so cancelled jobs cannot repopulate purged data.
+- **Model-aware.** The index records the embedding model and resets when the model
+  changes, preventing retrieval across incompatible vector spaces.
+- **Resilient to dense files.** Oversized embedding inputs are isolated, split at
+  UTF-8-safe boundaries, and retried without failing the rest of the batch.
+- **Live.** File events are filtered and debounced for 1.5 seconds before automatic
+  re-indexing.
+- **Repository-aware.** `.gitignore`, `node_modules`, `.git`, build output, binaries,
+  and files larger than 5 MB are excluded.
+
+## Memory footprint
+
+The design goal is a RAG layer small enough to leave running all day.
+
+| Representation | Per chunk | At 50,000 chunks |
+| --- | ---: | ---: |
+| Naive f32 vectors plus heap text | ~5 KB | ~265 MB |
+| **Context-Lemon** | **917 B** | **~44 MB** |
+
+Embeddings are unit-normalized, rescaled so their largest component maps to ±127, and
+stored as int8. This reduces a 768-dimensional vector from 3,072 bytes to 768 bytes.
+Chunk text lives in an append-only, generation-numbered disk blob and is read only for
+the retrieved top-k results.
+
+The `quantization_preserves_ranking_and_score` test compares int8 retrieval with exact
+f32 cosine similarity across 200 vectors. It requires the same top-1 result, the same
+top-5 set, and scores within `0.01`.
+
+## Grounding and quality tests
+
+The live quality suite tests behavior rather than merely checking that the model
+returned text:
+
+- attribution to the document containing a known fact;
+- synthesis across two different documents;
+- refusal when the answer is absent from the corpus;
+- rejection of plausible but incorrect default values; and
+- a known-answer query with non-empty citations.
+
+Run the deterministic unit suite:
+
+```powershell
+cd src-tauri
+cargo test --lib --locked
 ```
 
-That is real output, printed by `cargo test --test rag_quality -- --nocapture`, not a
-mock-up. `faq.md` ranks first because it is where the port is documented. The system
-prompt asks for inline `[Source N]` markers; Qwen3-0.6B-GGUF sometimes omits them even
-though it retrieves and answers correctly — the citation list itself is what's
-authoritative, not the inline marker, so this doesn't affect grounding.
+With Lemonade running, run the live RAG suites. Each suite builds a disposable index
+from the bundled sample, so it never reads or modifies the user's application index:
 
-The citation is the product. An answer you can't trace isn't useful.
-
-## Footprint
-
-The design constraint was a RAG layer small enough to leave running all day.
-
-| | Per chunk | At 50,000 chunks |
-|---|---|---|
-| Naive (f32 vectors + text on the heap) | ~5 KB | ~265 MB |
-| **This implementation** | **917 B** | **~44 MB** |
-
-Two decisions get it there:
-
-- **int8-quantised embeddings.** Vectors are unit-normalised, then rescaled so the
-  largest component lands on ±127. That rescaling is load-bearing: a raw 768-d unit
-  vector has components around 0.036, which would occupy barely three of the eight
-  bits available and quantise to mush. 3072 B → 768 B.
-- **Chunk text lives on disk**, in a side blob addressed by (offset, length). Only the
-  top-k are read back to build a prompt.
-
-Quantisation is not free in principle, so it is tested rather than assumed:
-`quantization_preserves_ranking_and_score` compares int8 against exact f32 cosine over
-200 vectors and requires an identical top-1, an identical top-5 set, and every score
-within 0.01.
-
-The live figure is shown in the UI (`4 file(s) indexed · 4 chunk(s) · 4.1 KB RAM`), so
-it is readable off the screen rather than taken on trust.
-
-## Hardware
-
-**Lemonade auto-selects its own backend — this app does nothing hardware-specific.**
-Every Lemonade engine (`llamacpp` included) defaults to `backend = auto`
-(`lemonade config`): if a GPU is present it installs and runs the CUDA/ROCm/Vulkan
-backend for it; with no GPU it falls back to CPU. Verified on this machine — before any
-of this project's code runs, `lemonade backends` already shows `llamacpp cuda
-installed`, auto-selected because it found the RTX 3050. No config on the app's side
-switches this; Lemonade decided before the first request arrived.
-
-The default chat model, **Qwen3-0.6B-GGUF** (`unsloth/Qwen3-0.6B-GGUF:Q4_0` — genuine
-4-bit, llama.cpp's direct INT4 quant), was chosen for exactly this reason: it needs no
-GPU to be fast, so the app stays usable on CPU-only hardware, not just on whatever the
-development machine happens to have.
-
-Measured with `lemonade bench Qwen3-0.6B-GGUF --scenarios chat`:
-
-| Spec | Value |
-|---|---|
-| RAM | 16 GB |
-| GPU | NVIDIA RTX 3050 6 GB (laptop), auto-selected by Lemonade |
-| NPU | none |
-| Generation | 213–215 tok/s |
-| Time to first token | 39–62 ms |
-
-Model *choice* (which model, not which device) is currently fixed rather than tiered
-by detected RAM/VRAM — see [Status](#status).
-
-## Behaviour worth knowing
-
-- **Incremental.** Re-indexing hashes content and skips unchanged files. Hashing is
-  FNV-1a, spelled out rather than `DefaultHasher`, whose algorithm std documents as
-  unstable across Rust releases — a toolchain upgrade would otherwise invalidate every
-  fingerprint at once and silently force a full re-embed.
-- **Reconciling.** Files deleted, renamed, newly gitignored, or grown past the 5 MB cap
-  are purged from the index, so nothing is ever cited from a file that no longer says it.
-- **Crash-safe.** The index is written to a temp file, fsynced, then renamed. An index
-  that fails to load is preserved as `index.bin.corrupt` rather than silently replaced
-  with an empty one — those embeddings cost real compute.
-- **Cancellable.** Removing a folder calls off any in-flight index job for it, and the
-  cancellation is rechecked under the store lock, so a job cannot write chunks for a
-  folder after it was purged.
-- **Model-aware.** Two embedding models can share a dimensionality while embedding into
-  unrelated spaces, so the index records which model produced it and resets if that
-  changes. Without this, swapping models yields confident citations ranked against a
-  foreign vector space.
-- **Live.** Watched folders are re-indexed automatically on change. Events are debounced
-  for 1.5 s of quiet first, because editors don't write a file once — they write,
-  rename, and touch it several times over a few hundred milliseconds, and re-indexing on
-  the first event would mean re-embedding a file you're still typing into. Events from
-  `node_modules`, `.git` and friends are discarded before they reach the queue, so a
-  `git status` in a watched repo doesn't trigger a pass.
-- **Ignores what you'd expect.** Honours `.gitignore`; skips `node_modules`, `.git`,
-  build output, and binaries; indexes 30+ text extensions.
-
-## Storage
-
+```powershell
+cargo test --test rag_smoke --locked -- --nocapture
+cargo test --test rag_quality --locked -- --nocapture
 ```
+
+The live suites skip when Lemonade is unavailable, so CI runs the deterministic
+library suite. When Lemonade is reachable, indexing or model failures fail the test.
+The Windows CI workflow also type-checks and builds the frontend with `npm run build`.
+
+## Privacy boundary
+
+All indexed content stays on the local machine. Context-Lemon sends embeddings and
+chat requests only to the configured Lemonade Server URL, which defaults to
+`http://localhost:13305/v1`. Models and Lemonade Server are installed separately and
+are not redistributed by this repository.
+
+Local state is stored under:
+
+```text
 %APPDATA%\lemonade-context-engine\
   config.json           watched folders + Lemonade URL
   index.bin             metadata + int8 vectors (format v3)
   chunks.<gen>.dat      chunk text, read on demand
-  index.bin.corrupt     kept if an index ever fails to load
+  index.bin.corrupt     preserved failed index, if one occurs
 ```
 
-The text blob is append-only and generation-numbered: compaction publishes a new
-generation and deletes the old one only after the index that references it is durably
-on disk, so no crash point leaves a mismatched pair.
+## Hardware
 
-## Build from source
+Context-Lemon contains no device-specific inference code. Lemonade selects its own
+CPU, GPU, or NPU backend; the application uses the same local HTTP API in every case.
+The default 4-bit `Qwen3-0.6B-GGUF` model was chosen to remain useful on CPU-only
+machines.
+
+Current development benchmark:
+
+| Spec | Result |
+| --- | --- |
+| RAM | 16 GB |
+| GPU | NVIDIA RTX 3050 6 GB laptop, selected by Lemonade |
+| NPU | None |
+| Generation | 213–215 tok/s |
+| Time to first token | 39–62 ms |
+
+An AMD Ryzen AI or Radeon validation run is still recommended before challenge
+submission. The exact capture procedure and results table are in the
+[submission checklist](docs/submission-checklist.md).
+
+## Build and package
 
 ```powershell
-cd lemonade-context-engine
-npm install
-npm run tauri dev      # or: npm run tauri build
+npm ci
+npm run build
+npm run tauri build
 ```
 
-Tests:
+`npm run tauri build` produces the desktop executable and attempts the configured
+Windows bundles. On the development machine, the application executable builds, but
+first-time WiX download timeouts have blocked MSI generation. The release checklist
+keeps the executable as a fallback artifact while installer generation is resolved.
 
-```powershell
-cd src-tauri
-cargo test --lib                        # store: quantisation, persistence, budget
-cargo test --test rag_smoke             # end-to-end, needs Lemonade running
-cargo test --test rag_quality           # grounding + refusal, needs Lemonade running
-```
+A no-bundle production build writes
+`src-tauri/target/release/lemonade-context-engine.exe`; `Context-Lemon` is the
+user-facing application and bundle name.
 
-The live suites skip (rather than fail) when Lemonade isn't reachable or no index
-exists yet.
+## Project status
 
-> **Note for this development machine:** `~/.cargo` is owned by `Administrators` with
-> only read+execute for `Users`, and the shell runs under a UAC-filtered token, so cargo
-> cannot write its registry cache. Set `$env:CARGO_HOME = "D:\AMD_Lemonade\.cargo-home"`
-> before any cargo/tauri command. Not needed on a normal install.
+Implemented: tray app, folder registration, first-run sample, gitignore-aware walking,
+overlap chunking, int8 disk-backed storage, incremental and reconciling indexing, live
+file watching, retrieval, grounded generation, citations, deterministic unit tests,
+live RAG quality tests, and Windows CI.
 
-## Status
+Before challenge submission:
 
-Implemented: tray app, folder registration, gitignore-aware walking, overlap chunking,
-int8 disk-backed store, incremental + reconciling indexing, **live file watching**,
-retrieval, grounded generation with citations, first-run offline demo.
+- publish the signed or clearly labeled unsigned `v0.1.0` Windows artifact;
+- capture the authentic screenshots and 60–120 second demo;
+- add AMD hardware results if suitable hardware is available; and
+- optionally add hardware-aware model tiering (the current model choice is fixed).
 
-Not yet implemented:
+## License
 
-- Hardware detection and model tiering (model choice is fixed)
-- CI
-- Signed installer — see [Packaging](#packaging)
+Context-Lemon is MIT licensed; see [LICENSE](LICENSE). Direct and transitive dependency
+licenses are documented in [THIRD_PARTY.md](THIRD_PARTY.md).
 
-### Packaging
-
-`npm run tauri build` produces a working `lemonade-context-engine.exe` (13.9 MB, inside
-the 20 MB budget), but MSI bundling currently fails on this machine: Tauri downloads
-the WiX toolset from GitHub on first bundle and the request exceeds its global timeout.
-The application itself builds and runs; only the installer step is blocked.
-
-## Licence
-
-This project: MIT (see [LICENSE](LICENSE)).
-Dependencies: 12 direct, 519 transitive, all permissive — see
-[THIRD_PARTY.md](THIRD_PARTY.md).
-
-Models and Lemonade Server are **not** redistributed; you install them yourself. The
-bundled `sample/` corpus is fiction written for this project — "Project Nightingale"
-and Aeroflux Systems do not exist.
+The bundled `sample/` corpus is original fiction created for this project. “Project
+Nightingale” and “Aeroflux Systems” are not real organizations.

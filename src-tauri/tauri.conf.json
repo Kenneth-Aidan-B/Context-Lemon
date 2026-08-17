@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lemonade-context-engine",
+  "productName": "Context-Lemon",
   "version": "0.1.0",
   "identifier": "com.lemonade.contextengine",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Lemonade Context Engine",
+        "title": "Context-Lemon",
         "width": 820,
         "height": 760,
         "minWidth": 560,
