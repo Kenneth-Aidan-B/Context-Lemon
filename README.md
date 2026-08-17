@@ -68,9 +68,12 @@ indexes it automatically. Ask:
 The expected answer is port `7913`, with `sample/faq.md` ranked among the citations.
 This is a real quality-test case, not a hard-coded response.
 
-There is not yet a downloadable GitHub Release. Until `v0.1.0` is published, the
-source workflow above is the supported installation path. Packaging and release steps
-are tracked in the [submission checklist](docs/submission-checklist.md).
+### Windows download
+
+Download [Context-Lemon v0.1.0](https://github.com/Kenneth-Aidan-B/Context-Lemon/releases/tag/v0.1.0)
+or use the source workflow above. The standalone Windows executable is currently an
+unsigned preview, so Windows may show a SmartScreen warning. Lemonade Server and the
+two models listed above must be installed separately.
 
 ## Architecture
 
@@ -225,7 +228,7 @@ live RAG quality tests, and Windows CI.
 
 Before challenge submission:
 
-- publish the signed or clearly labeled unsigned `v0.1.0` Windows artifact;
+- replace the unsigned preview with a signed installer when available;
 - capture the authentic screenshots and 60–120 second demo;
 - add AMD hardware results if suitable hardware is available; and
 - optionally add hardware-aware model tiering (the current model choice is fixed).
