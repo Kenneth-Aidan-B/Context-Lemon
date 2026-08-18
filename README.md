@@ -47,7 +47,7 @@ lemonade pull Qwen3-0.6B-GGUF
 ```
 
 Download the latest Windows executable from
-[Context-Lemon v0.1.0](https://github.com/Kenneth-Aidan-B/Context-Lemon/releases/tag/v0.1.0)
+[Context-Lemon v0.2.0](https://github.com/Kenneth-Aidan-B/Context-Lemon/releases/tag/v0.2.0)
 and launch it. The current executable is unsigned, so Windows may display a
 SmartScreen warning. Lemonade Server and the models are installed separately and are
 not bundled with the application.
@@ -122,6 +122,12 @@ embedding API, or remote vector database.
   changes, preventing retrieval across incompatible vector spaces.
 - **Resilient to dense files.** Oversized embedding inputs are isolated, split at
   UTF-8-safe boundaries, and retried without failing the rest of the batch.
+- **Resilient to transient failures.** A dropped local connection is retried with
+  backoff rather than aborting an entire folder's indexing run, while HTTP and model
+  errors still surface immediately.
+- **Batched across files.** Embedding requests are filled from a bounded window of
+  chunks spanning many files, so a corpus of small files still produces full-sized
+  batches instead of one near-empty request per file.
 - **Live.** File events are filtered and debounced for 1.5 seconds before automatic
   re-indexing.
 - **Repository-aware.** `.gitignore`, `node_modules`, `.git`, build output, binaries,
@@ -144,6 +150,49 @@ the retrieved top-k results.
 The `quantization_preserves_ranking_and_score` test compares int8 retrieval with exact
 f32 cosine similarity across 200 vectors. It requires the same top-1 result, the same
 top-5 set, and scores within `0.01`.
+
+## Indexing performance
+
+Measured on the reference development machine in a release build, over a synthetic
+corpus of small Markdown files — the shape a source repository or a notes folder takes.
+
+| Workload | Result | Time |
+| --- | --- | ---: |
+| Cold index | 10,000 files → 10,000 chunks | 46.75 s |
+| Unchanged rescan | 10,000 files skipped, 0 embeddings regenerated | 3.47 s |
+| 1% modified | 100 files re-embedded, 9,900 skipped | 4.09 s |
+
+Cold indexing sustains roughly 214 files/s. Throughput is flat between 5,000 and 10,000
+files, so cost scales linearly with corpus size rather than degrading as the index grows.
+
+Where that time goes at 10,000 files:
+
+| Stage | Share of cold-index time |
+| --- | ---: |
+| Lemonade embedding | ~90% |
+| Local persistence (int8 store and periodic flush) | ~6% |
+| Filesystem traversal, reads, and content hashing | ~4% |
+
+Approximately 90% of cold-indexing time is spent in Lemonade embedding, while
+filesystem, hashing, and persistence together account for approximately 10%.
+Application-side work is therefore not the dominant cost: the workload is bounded by
+local inference throughput, which is what changes across CPU, GPU, and NPU backends.
+
+These figures are reproducible rather than asserted. The benchmarks ship in the test
+suite, marked `#[ignore]` so they never run in CI, and write only to temporary
+directories:
+
+```powershell
+cd src-tauri
+cargo test --release --test bench_scaling --locked -- --ignored --nocapture
+cargo test --release --test bench_decompose --locked -- --ignored --nocapture
+```
+
+`bench_scaling` covers cold-index scaling at 1,000/5,000/10,000 files and the
+incremental cases above; `bench_decompose` separates Lemonade embedding cost from
+local persistence cost. Both require a running Lemonade Server. Release builds matter
+here: an unoptimized build inflates local persistence cost by roughly 60x and makes it
+look like the bottleneck, which it is not.
 
 ## Grounding and quality tests
 
@@ -237,7 +286,11 @@ user-facing application and bundle name.
 
 ## Release status
 
-Version `0.1.0` includes the tray application, folder registration, first-run sample,
+Version `0.2.0` adds cross-file embedding batching, live indexing progress in the UI
+(files scanned, files remaining, and chunks embedded), retry on transient local
+connection failures, and the reproducible indexing benchmarks documented above.
+
+Version `0.1.0` established the tray application, folder registration, first-run sample,
 gitignore-aware walking, overlap chunking, int8 disk-backed storage, incremental and
 reconciling indexing, live file watching, retrieval, grounded generation, file-and-line
 citations, deterministic unit tests, live RAG quality tests, and Windows CI.

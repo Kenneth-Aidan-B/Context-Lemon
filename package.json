@@ -1,7 +1,7 @@
 {
   "name": "lemonade-context-engine",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A fully local folder-aware RAG and memory layer for AMD Lemonade.",
   "license": "MIT",
   "repository": {

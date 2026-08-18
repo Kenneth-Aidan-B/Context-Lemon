@@ -103,14 +103,37 @@ impl LemonadeClient {
             return Ok(Vec::new());
         }
         let url = format!("{}/embeddings", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", "Bearer lemonade")
-            .json(&json!({ "model": model, "input": texts }))
-            .send()
-            .await
-            .map_err(|e| format!("embeddings request failed: {e}"))?;
+
+        // A transient send failure (observed in practice: an isolated dropped loopback
+        // connection during a long run, with the server otherwise healthy throughout)
+        // must not abort an entire folder's indexing job. Retried a couple of times
+        // with a short backoff before surfacing it as a real failure; a genuinely
+        // unreachable or crashed server still fails after these attempts.
+        const MAX_SEND_ATTEMPTS: u32 = 3;
+        let mut resp = None;
+        let mut send_err = String::new();
+        for attempt in 1..=MAX_SEND_ATTEMPTS {
+            match self
+                .http
+                .post(&url)
+                .header("Authorization", "Bearer lemonade")
+                .json(&json!({ "model": model, "input": texts }))
+                .send()
+                .await
+            {
+                Ok(r) => {
+                    resp = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    send_err = format!("embeddings request failed: {e}");
+                    if attempt < MAX_SEND_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(300 * attempt as u64)).await;
+                    }
+                }
+            }
+        }
+        let resp = resp.ok_or(send_err)?;
 
         let status = resp.status();
         let body = resp

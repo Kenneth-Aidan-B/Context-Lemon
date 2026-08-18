@@ -1,6 +1,6 @@
 [package]
 name = "lemonade-context-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "A fully local folder-aware RAG and memory layer for AMD Lemonade"
 authors = ["Kenneth Aidan B"]
 edition = "2021"
@@ -31,6 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "htt
 ignore = "0.4"
 bincode = "1"
 notify = "6"
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 tempfile = "3"

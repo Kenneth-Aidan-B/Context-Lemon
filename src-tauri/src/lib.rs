@@ -159,7 +159,11 @@ pub(crate) async fn run_index_job(app: &tauri::AppHandle, folder: &str) {
 
     let token = jobs.start(folder);
     let _ = app.emit("index-progress", folder);
-    let result = rag::index_folder(&store, &client, folder, &token).await;
+    let progress_app = app.clone();
+    let on_progress = |p: rag::IndexProgress| {
+        let _ = progress_app.emit("index-progress-detail", p);
+    };
+    let result = rag::index_folder(&store, &client, folder, &token, &on_progress).await;
     jobs.finish(folder, &token);
 
     match result {

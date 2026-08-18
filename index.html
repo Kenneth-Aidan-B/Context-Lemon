@@ -31,8 +31,11 @@
           <button type="submit" id="ask-submit">Ask</button>
         </form>
         <div id="answer-box" class="answer-box" hidden>
-          <p id="answer-text"></p>
-          <ul id="sources-list"></ul>
+          <div id="answer-text" class="answer-content" aria-live="polite"></div>
+          <div id="sources-box" class="sources-box" hidden>
+            <h3>Sources</h3>
+            <ul id="sources-list"></ul>
+          </div>
         </div>
       </section>
 

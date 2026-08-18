@@ -41,7 +41,7 @@ pub async fn setup() -> Option<LiveFixture> {
         assert!(sample.is_dir(), "sample corpus not found at {}", sample.display());
 
         let cancel = AtomicBool::new(false);
-        let stats = rag::index_folder(&store, &client, &sample.to_string_lossy(), &cancel)
+        let stats = rag::index_folder(&store, &client, &sample.to_string_lossy(), &cancel, &|_| {})
             .await
             .expect("failed to index the bundled sample through Lemonade");
         assert!(!stats.cancelled, "sample indexing was unexpectedly cancelled");

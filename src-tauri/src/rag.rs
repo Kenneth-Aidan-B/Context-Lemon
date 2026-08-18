@@ -15,11 +15,24 @@ pub const EMBEDDING_MODEL: &str = "nomic-embed-text-v1-GGUF";
 /// download on a machine that already has it, and it's under half the size of
 /// Qwen3-1.7B-GGUF, which cuts both resident memory and cold-load time.
 pub const CHAT_MODEL: &str = "Qwen3-0.6B-GGUF";
-const EMBED_BATCH_SIZE: usize = 32;
+/// Verified against Lemonade directly (raw batch-size sweep): 64 embeds in ~1.7x the
+/// throughput of 32 with no change to the embeddings themselves, so this is a pure
+/// win. Concurrency (issuing several requests at once instead of raising this number)
+/// was benchmarked too and made things worse — this backend appears to serialize
+/// embedding requests internally, so extra client-side parallelism just adds queueing
+/// delay rather than doing more work at once.
+const EMBED_BATCH_SIZE: usize = 64;
 const TOP_K: usize = 5;
 /// Persist at most this often during a run, so a long index is not lost on a crash
 /// but we still avoid rewriting the whole index once per file.
 const FLUSH_EVERY_N_FILES: usize = 50;
+/// A folder full of small files (a chunk or two each) used to mean a chunk-count-32
+/// tail batch per file — one nearly-empty request per file instead of a handful of
+/// full ones. Buffering several files' spans before embedding lets one batch draw
+/// from many small files at once, so batches stay close to full regardless of how the
+/// corpus is split across files. Sized to a few batches' worth so memory stays bounded
+/// by this constant rather than by the whole corpus.
+const QUEUE_FLUSH_CHUNKS: usize = EMBED_BATCH_SIZE * 4;
 /// How many times a single chunk may be halved before it's given up on rather than
 /// embedded. 2^6 = 64-way split of a ~1400-char chunk bottoms out well under the
 /// 200-char floor below, so this is never the binding constraint in practice.
@@ -40,11 +53,37 @@ pub struct IndexStats {
     pub cancelled: bool,
 }
 
+/// A snapshot of how far an in-progress `index_folder` run has gotten, for the UI to
+/// show files remaining rather than a single opaque "Indexing…" line.
+#[derive(Debug, Serialize, Clone)]
+pub struct IndexProgress {
+    pub folder: String,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub chunks_indexed: usize,
+}
+
+/// How often to report progress while walking files, in files scanned. Frequent
+/// enough that a folder of thousands of files still updates the UI regularly, without
+/// emitting a Tauri event per file.
+const PROGRESS_EVERY_N_FILES: usize = 20;
+
+/// A file whose content changed (or is new) and whose chunks are waiting to be
+/// embedded. Held in a bounded buffer rather than embedded immediately, so several
+/// files' chunks can be combined into full-sized embedding batches.
+struct PendingFile {
+    path_str: String,
+    mtime: u64,
+    file_hash: u64,
+    spans: Vec<chunker::ChunkSpan>,
+}
+
 pub async fn index_folder(
     store: &VectorStore,
     client: &LemonadeClient,
     folder: &str,
     cancel: &AtomicBool,
+    on_progress: &(dyn Fn(IndexProgress) + Send + Sync),
 ) -> Result<IndexStats, String> {
     // A model swap invalidates every stored vector, so catch it before doing any work.
     if store.reset_if_model_changed(EMBEDDING_MODEL) {
@@ -53,6 +92,7 @@ pub async fn index_folder(
 
     let root = Path::new(folder);
     let files = walker::walk_folder(root);
+    let files_total = files.len();
 
     // Anything previously indexed under this folder that the walk no longer yields
     // (deleted, renamed, now ignored, or grown past the size cap) must be dropped,
@@ -68,10 +108,23 @@ pub async fn index_folder(
     let mut files_skipped_unchanged = 0usize;
     let mut files_failed = 0usize;
     let mut since_flush = 0usize;
+    let mut files_walked = 0usize;
+
+    let mut pending: Vec<PendingFile> = Vec::new();
+    let mut queued_chunks = 0usize;
+
+    on_progress(IndexProgress {
+        folder: folder.to_string(),
+        files_done: 0,
+        files_total,
+        chunks_indexed,
+    });
 
     for file_path in files {
         // Checked before each file, and again inside the store under its lock, so a
-        // removed folder cannot have chunks written for it after the purge.
+        // removed folder cannot have chunks written for it after the purge. Anything
+        // still sitting in `pending` at this point has not been embedded yet, so
+        // abandoning it here loses no committed work — the next run just re-chunks it.
         if cancel.load(Ordering::SeqCst) {
             store.flush().map_err(|e| e.to_string())?;
             return Ok(IndexStats {
@@ -81,6 +134,16 @@ pub async fn index_folder(
                 files_purged,
                 files_failed,
                 cancelled: true,
+            });
+        }
+
+        files_walked += 1;
+        if files_walked % PROGRESS_EVERY_N_FILES == 0 {
+            on_progress(IndexProgress {
+                folder: folder.to_string(),
+                files_done: files_walked,
+                files_total,
+                chunks_indexed,
             });
         }
 
@@ -120,69 +183,78 @@ pub async fn index_folder(
             continue;
         }
 
-        let mut new_chunks = Vec::with_capacity(spans.len());
-        let mut dropped = 0usize;
-        for batch in spans.chunks(EMBED_BATCH_SIZE) {
-            let texts: Vec<String> = batch.iter().map(|s| s.text.clone()).collect();
-            let embedded: Vec<(chunker::ChunkSpan, Vec<f32>)> =
-                match client.embed(&texts, EMBEDDING_MODEL).await {
-                    Ok(embeddings) => batch.iter().cloned().zip(embeddings).collect(),
-                    // One dense chunk (e.g. escape-heavy JSON) tokenizing past the
-                    // backend's limit must not sink the other 31 in this batch, or —
-                    // since this whole function bails via `?` — every file behind it
-                    // in the folder. Fall back to one request per chunk so only the
-                    // oversized one needs the slower, splitting path.
-                    Err(e) if e.starts_with(lemonade::EMBED_TOO_LARGE_PREFIX) => {
-                        let mut resolved = Vec::with_capacity(batch.len());
-                        for span in batch {
-                            resolved.extend(embed_span_resilient(client, span.clone()).await?);
-                        }
-                        resolved
-                    }
-                    Err(e) => return Err(e),
-                };
-            for (span, embedding) in embedded {
-                if embedding.is_empty() {
-                    dropped += 1;
-                    continue;
-                }
-                new_chunks.push(NewChunk {
-                    start_line: span.start_line,
-                    end_line: span.end_line,
-                    text: span.text,
-                    embedding,
+        queued_chunks += spans.len();
+        pending.push(PendingFile {
+            path_str,
+            mtime,
+            file_hash,
+            spans,
+        });
+
+        if queued_chunks >= QUEUE_FLUSH_CHUNKS {
+            let continued = process_window(
+                &mut pending,
+                store,
+                client,
+                cancel,
+                &mut files_indexed,
+                &mut chunks_indexed,
+                &mut files_failed,
+                &mut since_flush,
+            )
+            .await?;
+            queued_chunks = 0;
+            if !continued {
+                store.flush().map_err(|e| e.to_string())?;
+                return Ok(IndexStats {
+                    files_indexed,
+                    chunks_indexed,
+                    files_skipped_unchanged,
+                    files_purged,
+                    files_failed,
+                    cancelled: true,
                 });
             }
-        }
-
-        if dropped > 0 {
-            // Storing a partial file under its current hash would mark it "unchanged"
-            // forever, leaving a permanent hole. Leave the fingerprint stale so the
-            // next run retries it, and report the failure.
-            files_failed += 1;
-            continue;
-        }
-
-        let chunk_count = new_chunks.len();
-        let written = store
-            .upsert_file(&path_str, mtime, file_hash, new_chunks, cancel)
-            .map_err(|e| e.to_string())?;
-        if !written {
-            // Cancelled while this file was being embedded; the next loop iteration
-            // reports the cancellation.
-            continue;
-        }
-        chunks_indexed += chunk_count;
-        files_indexed += 1;
-
-        since_flush += 1;
-        if since_flush >= FLUSH_EVERY_N_FILES {
-            store.flush().map_err(|e| e.to_string())?;
-            since_flush = 0;
+            on_progress(IndexProgress {
+                folder: folder.to_string(),
+                files_done: files_walked,
+                files_total,
+                chunks_indexed,
+            });
         }
     }
 
+    let continued = process_window(
+        &mut pending,
+        store,
+        client,
+        cancel,
+        &mut files_indexed,
+        &mut chunks_indexed,
+        &mut files_failed,
+        &mut since_flush,
+    )
+    .await?;
+    if !continued {
+        store.flush().map_err(|e| e.to_string())?;
+        return Ok(IndexStats {
+            files_indexed,
+            chunks_indexed,
+            files_skipped_unchanged,
+            files_purged,
+            files_failed,
+            cancelled: true,
+        });
+    }
+
     store.flush().map_err(|e| e.to_string())?;
+
+    on_progress(IndexProgress {
+        folder: folder.to_string(),
+        files_done: files_walked,
+        files_total,
+        chunks_indexed,
+    });
 
     Ok(IndexStats {
         files_indexed,
@@ -192,6 +264,118 @@ pub async fn index_folder(
         files_failed,
         cancelled: false,
     })
+}
+
+/// Embed every chunk currently buffered in `pending`, drawing batches from across all
+/// of those files rather than restarting a fresh batch at each file boundary, then
+/// upsert each file once its chunks are embedded. Drains `pending` either way. Returns
+/// `Ok(false)` if cancellation was observed mid-window — in which case any chunks not
+/// yet embedded, and any files not yet upserted, are simply abandoned rather than
+/// written, which is safe because nothing abandoned here was ever committed.
+async fn process_window(
+    pending: &mut Vec<PendingFile>,
+    store: &VectorStore,
+    client: &LemonadeClient,
+    cancel: &AtomicBool,
+    files_indexed: &mut usize,
+    chunks_indexed: &mut usize,
+    files_failed: &mut usize,
+    since_flush: &mut usize,
+) -> Result<bool, String> {
+    struct QueueItem<'a> {
+        file_idx: usize,
+        span: &'a chunker::ChunkSpan,
+    }
+
+    let mut queue: Vec<QueueItem> = Vec::new();
+    for (idx, pf) in pending.iter().enumerate() {
+        for span in &pf.spans {
+            queue.push(QueueItem { file_idx: idx, span });
+        }
+    }
+
+    let mut results: Vec<Vec<(chunker::ChunkSpan, Vec<f32>)>> =
+        (0..pending.len()).map(|_| Vec::new()).collect();
+
+    for batch in queue.chunks(EMBED_BATCH_SIZE) {
+        if cancel.load(Ordering::SeqCst) {
+            pending.clear();
+            return Ok(false);
+        }
+
+        let texts: Vec<String> = batch.iter().map(|item| item.span.text.clone()).collect();
+        match client.embed(&texts, EMBEDDING_MODEL).await {
+            Ok(embeddings) => {
+                for (item, embedding) in batch.iter().zip(embeddings) {
+                    results[item.file_idx].push((item.span.clone(), embedding));
+                }
+            }
+            // One dense chunk (e.g. escape-heavy JSON) tokenizing past the backend's
+            // limit must not sink the rest of this batch, or — since this whole
+            // function bails via `?` — every file behind it. Fall back to one request
+            // per chunk so only the oversized one needs the slower, splitting path.
+            Err(e) if e.starts_with(lemonade::EMBED_TOO_LARGE_PREFIX) => {
+                for item in batch {
+                    let resolved = embed_span_resilient(client, item.span.clone()).await?;
+                    results[item.file_idx].extend(resolved);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    for (pf, embedded) in pending.drain(..).zip(results) {
+        // Re-checked per file: the batches above may have taken a while, and a store
+        // write must not slip in after cancellation — `upsert_file` also checks this
+        // itself, under its lock, but checking here too avoids doing the assembly work
+        // for files that are just going to be discarded anyway.
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+
+        let mut new_chunks = Vec::with_capacity(embedded.len());
+        let mut dropped = 0usize;
+        for (span, embedding) in embedded {
+            if embedding.is_empty() {
+                dropped += 1;
+                continue;
+            }
+            new_chunks.push(NewChunk {
+                start_line: span.start_line,
+                end_line: span.end_line,
+                text: span.text,
+                embedding,
+            });
+        }
+
+        if dropped > 0 {
+            // Storing a partial file under its current hash would mark it "unchanged"
+            // forever, leaving a permanent hole. Leave the fingerprint stale so the
+            // next run retries it, and report the failure.
+            *files_failed += 1;
+            continue;
+        }
+
+        let chunk_count = new_chunks.len();
+        let written = store
+            .upsert_file(&pf.path_str, pf.mtime, pf.file_hash, new_chunks, cancel)
+            .map_err(|e| e.to_string())?;
+        if !written {
+            // Cancelled while this file was being written; the next file (or the
+            // caller, once this window returns) reports the cancellation.
+            continue;
+        }
+        *chunks_indexed += chunk_count;
+        *files_indexed += 1;
+
+        *since_flush += 1;
+        if *since_flush >= FLUSH_EVERY_N_FILES {
+            store.flush().map_err(|e| e.to_string())?;
+            *since_flush = 0;
+        }
+    }
+
+    Ok(true)
 }
 
 /// Embed one chunk, halving and retrying it if Lemonade rejects it as too large,
@@ -316,7 +500,10 @@ pub async fn ask(store: &VectorStore, client: &LemonadeClient, question: &str) -
 
     let system = "You are a helpful assistant answering questions using ONLY the provided context. \
         Every claim must be grounded in the context below. If the answer isn't in the context, say so \
-        plainly instead of guessing. Cite sources inline using the format [Source N].";
+        plainly instead of guessing. Cite sources inline using the format [Source N]. Write concise, \
+        readable Markdown: use short headings for distinct sections, bullets or numbered lists for \
+        multiple items, and fenced code blocks for source code. Put each list item and code block on \
+        its own lines; do not compress the entire answer into one paragraph.";
     let user = format!("Context:\n{context}\nQuestion: {trimmed}");
 
     let answer = client.chat(CHAT_MODEL, system, &user, true).await?;
