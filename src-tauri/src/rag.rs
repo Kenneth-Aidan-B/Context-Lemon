@@ -22,8 +22,9 @@ pub const EMBEDDING_MODEL: &str = "nomic-embed-text-v1-GGUF";
 /// — a premise the corpus never states — it answered "SHA-256", inventing a security
 /// property from a hashing detail. Bonsai scored 7/7, reproduced the timeline in full,
 /// and correctly refused the loaded question. Refusing to answer what isn't in the
-/// corpus is the whole product, so that trade is worth the ~2.5x slower generation
-/// (~40 tok/s vs ~100 tok/s warm) — still comfortably faster than reading speed.
+/// corpus is the whole product, so that trade is worth the ~2.7x slower generation
+/// (47-51 tok/s vs 115-136 tok/s streamed, time to first token effectively tied) —
+/// still comfortably faster than reading speed.
 ///
 /// Only the *default*; users pick any installed model under the cap from the UI.
 pub const DEFAULT_CHAT_MODEL: &str = "Bonsai-8B-gguf";

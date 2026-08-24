@@ -176,9 +176,9 @@ out of a hashing detail. `Bonsai-8B-gguf` scored 7 of 7, reproduced the timeline
 full, and correctly refused the loaded question.
 
 Refusing to answer what is not in the corpus is the whole point, so that trade is worth
-roughly 2.5x slower generation (~40 tok/s against ~100 tok/s warm, same machine and
-backend). Both models remain selectable, along with every other installed model under
-the cap.
+roughly 2.7x slower generation — 47–51 tok/s against 115–136 tok/s on the same machine
+and backend, with time to first token effectively tied. Both models remain selectable,
+along with every other installed model under the cap.
 
 ## Memory footprint
 
@@ -296,18 +296,38 @@ The default `Bonsai-8B-gguf` model was chosen to stay under 2 GB while loaded, s
 remains usable on machines without a discrete GPU — see [Choosing a
 model](#choosing-a-model).
 
-Reference development benchmark:
+Reference development machine, as reported by Lemonade's own `system-info`:
 
-| Spec | Result |
+| Spec | Value |
 | --- | --- |
+| CPU | Intel Core i7-13620H, 10 cores / 16 threads |
 | RAM | 16 GB |
-| GPU | NVIDIA RTX 3050 6 GB laptop, selected by Lemonade |
-| NPU | None |
-| Generation | 213–215 tok/s |
-| Time to first token | 39–62 ms |
+| Discrete GPU | None detected |
+| NPU | None detected |
+| Backend chosen by Lemonade | Integrated GPU (both models report `device: gpu`) |
 
-These figures describe the development machine and are not presented as AMD hardware
-results. Actual performance depends on the model, Lemonade backend, and device.
+Generation measured over five streamed runs each, after a warm-up request, timing the
+first visible token separately from the tokens that follow:
+
+| Model | Time to first token | Generation |
+| --- | --- | --- |
+| `Bonsai-8B-gguf` (default) | 128–160 ms | 47–51 tok/s |
+| `Qwen3-0.6B-GGUF` | 137–153 ms | 115–136 tok/s |
+
+The smaller model generates roughly 2.7x faster; the default trades that for the
+grounding behaviour described in [Choosing a model](#choosing-a-model). Both stay well
+ahead of reading speed on a laptop with no discrete accelerator — Lemonade placed them
+on the integrated GPU without any hint from this application, which is the portability
+argument in practice rather than in principle.
+
+Time to first token is measured with reasoning suppressed, which is how the application
+issues the request. Left enabled, `Qwen3-0.6B-GGUF` spends roughly 3 seconds reasoning
+before emitting any visible text — the reason the `/no_think` control token is sent to
+that family.
+
+These figures describe one development machine with no discrete GPU or NPU, and are not
+presented as AMD hardware results. Actual performance depends on the model, the Lemonade
+backend, and the device.
 
 ## Build from source
 
