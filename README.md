@@ -321,7 +321,11 @@ The 6 GB model cap is not arbitrary: it is the VRAM on this card, and the point 
 a model stops fitting alongside everything else the GPU is doing.
 
 Generation measured over five streamed runs each, after a warm-up request, timing the
-first visible token separately from the tokens that follow:
+first visible token separately from the tokens that follow. These are end-to-end figures
+taken through the same HTTP API the application uses, so they include request and
+streaming overhead and read lower than a raw inference benchmark on the same card —
+which makes them the number that matters here, since it is what the app actually
+delivers:
 
 | Model | Time to first token | Generation |
 | --- | --- | --- |
