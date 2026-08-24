@@ -1,10 +1,119 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
 pub struct LemonadeClient {
     base_url: String,
     http: reqwest::Client,
+}
+
+/// A running model needs room for its KV cache and compute buffers on top of the
+/// weights Lemonade reports, so the checkpoint size alone understates what picking a
+/// model actually costs the machine.
+///
+/// Measured on the reference machine (i7-13620H, llama.cpp backend, ctx_size 4096) as
+/// the llama-server process's private bytes minus the reported checkpoint size:
+/// nomic-embed-text +0.10 GB, Qwen3-0.6B +0.69 GB, Bonsai-8B +0.85 GB. Rounded up from
+/// the worst case so the estimate errs high — promising a model will fit and then
+/// thrashing is far worse than being slightly pessimistic.
+const RUNTIME_OVERHEAD_GB: f64 = 0.9;
+
+/// The ceiling a model may be estimated to occupy at runtime and still be offered.
+/// Above this the app would be handing users a choice that stalls their machine.
+pub const MAX_MODEL_RAM_GB: f64 = 6.0;
+
+/// Under this, a model is flagged as leaving the machine comfortably usable alongside
+/// it — the tier you can pick without thinking about what else is running.
+pub const LIGHT_MODEL_RAM_GB: f64 = 2.0;
+
+/// Lemonade serves embedding, transcription, reranking and generation models from the
+/// same `/models` list, so the chat picker has to exclude everything that cannot answer
+/// a chat completion. Matching on what a model *is not* keeps new generation models
+/// working without a code change, which the reverse (an allow-list) would not.
+const NON_CHAT_LABELS: &[&str] = &[
+    "embeddings",
+    "embedding",
+    "reranking",
+    "transcription",
+    "realtime-transcription",
+    "tts",
+    "classification",
+    "image-generation",
+    "audio-generation",
+];
+
+/// One model Lemonade reports. Every field beyond `id` is optional: the OpenAI
+/// `/v1/models` shape guarantees only the id, and these extras are Lemonade's own.
+#[derive(Debug, Deserialize)]
+struct RawModel {
+    id: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    /// Checkpoint size in GB.
+    #[serde(default)]
+    size: Option<f64>,
+    #[serde(default)]
+    downloaded: Option<bool>,
+    #[serde(default)]
+    max_context_window: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsResponse {
+    data: Vec<RawModel>,
+}
+
+/// A generation model the user is allowed to pick, with the sizing the UI shows.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ChatModel {
+    pub id: String,
+    /// Weights on disk, in GB, exactly as Lemonade reports them.
+    pub size_gb: f64,
+    /// `size_gb` plus the measured runtime allowance — what to expect it to cost while
+    /// loaded, which is the number that actually matters when choosing.
+    pub estimated_ram_gb: f64,
+    /// True when this model stays under [`LIGHT_MODEL_RAM_GB`] while running.
+    pub light: bool,
+    pub max_context_window: Option<u64>,
+}
+
+/// Narrows Lemonade's full model list to the generation models a user may select.
+///
+/// Pulled out as a pure function so the filtering rules — which decide what a user is
+/// even offered — can be tested against Lemonade's real payload shapes without a
+/// server. A model whose size Lemonade does not report is dropped rather than shown:
+/// the whole point of the cap is that it is honoured, and an unknown size cannot be.
+fn select_chat_models(raw: Vec<RawModel>) -> Vec<ChatModel> {
+    let mut models: Vec<ChatModel> = raw
+        .into_iter()
+        .filter(|m| m.downloaded != Some(false))
+        .filter(|m| {
+            !m.labels
+                .iter()
+                .any(|l| NON_CHAT_LABELS.contains(&l.to_lowercase().as_str()))
+        })
+        .filter_map(|m| {
+            let size_gb = m.size?;
+            let estimated_ram_gb = size_gb + RUNTIME_OVERHEAD_GB;
+            (estimated_ram_gb <= MAX_MODEL_RAM_GB).then(|| ChatModel {
+                id: m.id,
+                size_gb,
+                estimated_ram_gb,
+                light: estimated_ram_gb < LIGHT_MODEL_RAM_GB,
+                max_context_window: m.max_context_window,
+            })
+        })
+        .collect();
+
+    // Cheapest first, so the models that leave the machine usable are the ones a user
+    // sees without scrolling. Ties broken by id to keep the order stable across calls.
+    models.sort_by(|a, b| {
+        a.estimated_ram_gb
+            .partial_cmp(&b.estimated_ram_gb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    models
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,9 +253,36 @@ impl LemonadeClient {
         parse_embeddings_response(&body, status, texts.len())
     }
 
-    pub async fn chat(&self, model: &str, system: &str, user: &str, no_think: bool) -> Result<String, String> {
+    /// The generation models installed in Lemonade that this app will let a user pick,
+    /// smallest first. Non-generation models and anything estimated to exceed
+    /// [`MAX_MODEL_RAM_GB`] while loaded are filtered out.
+    pub async fn list_chat_models(&self) -> Result<Vec<ChatModel>, String> {
+        let url = format!("{}/models", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", "Bearer lemonade")
+            .send()
+            .await
+            .map_err(|e| format!("could not reach Lemonade to list models: {e}"))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read the model list: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("listing models returned {status}: {body}"));
+        }
+
+        let parsed: ModelsResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("failed to parse the model list: {e}"))?;
+        Ok(select_chat_models(parsed.data))
+    }
+
+    pub async fn chat(&self, model: &str, system: &str, user: &str) -> Result<String, String> {
         let url = format!("{}/chat/completions", self.base_url);
-        let user_content = if no_think {
+        let user_content = if understands_no_think(model) {
             format!("{user}\n/no_think")
         } else {
             user.to_string()
@@ -205,6 +341,14 @@ impl LemonadeClient {
             .map(|r| r.status().is_success())
             .unwrap_or(false)
     }
+}
+
+/// `/no_think` is a Qwen3 control token that suppresses its `<think>` block. Other
+/// families do not implement it, so appending it there just tacks a stray line onto the
+/// prompt — harmless with the models tested, but it is still an instruction aimed at a
+/// model that cannot act on it, so it is only sent where it means something.
+fn understands_no_think(model: &str) -> bool {
+    model.to_lowercase().contains("qwen3")
 }
 
 /// Qwen3 wraps its reasoning in `<think>…</think>`. Returns the visible answer with
@@ -349,5 +493,114 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("internal server error"));
         assert!(!err.starts_with(EMBED_TOO_LARGE_PREFIX));
+    }
+
+    fn select_from(json: &str) -> Vec<ChatModel> {
+        let parsed: ModelsResponse =
+            serde_json::from_str(json).expect("fixture should parse as a model list");
+        select_chat_models(parsed.data)
+    }
+
+    /// Trimmed from a real `GET /v1/models` against Lemonade — the field names and the
+    /// mix of model kinds are exactly what the server sends, so the picker is tested
+    /// against the payload it will actually meet rather than an idealised one.
+    const REAL_PAYLOAD: &str = r#"{"data":[
+        {"id":"Bonsai-8B-gguf","labels":["llamacpp","tool-calling"],"size":1.08,"downloaded":true,"max_context_window":65536,"object":"model"},
+        {"id":"Gemma-4-E2B-it-GGUF","labels":["tool-calling","vision","llamacpp"],"size":3.81,"downloaded":true,"max_context_window":131072,"object":"model"},
+        {"id":"Moonshine-Medium-Streaming","labels":["transcription","realtime-transcription","hot"],"size":1.08,"downloaded":true,"object":"model"},
+        {"id":"Qwen3-0.6B-GGUF","labels":["reasoning","tool-calling"],"size":0.356,"downloaded":true,"max_context_window":40960,"object":"model"},
+        {"id":"Qwen3-1.7B-GGUF","labels":["reasoning","tool-calling"],"size":0.984,"downloaded":true,"max_context_window":40960,"object":"model"},
+        {"id":"nomic-embed-text-v1-GGUF","labels":["embeddings"],"size":0.073,"downloaded":true,"max_context_window":2048,"object":"model"}
+    ],"object":"list"}"#;
+
+    #[test]
+    fn embedding_and_transcription_models_are_not_offered_as_chat_models() {
+        let ids: Vec<String> = select_from(REAL_PAYLOAD).into_iter().map(|m| m.id).collect();
+        assert!(
+            !ids.iter().any(|id| id.contains("nomic-embed")),
+            "the embedding model must not be selectable for chat: {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("Moonshine")),
+            "the transcription model must not be selectable for chat: {ids:?}"
+        );
+        assert_eq!(
+            ids,
+            vec![
+                "Qwen3-0.6B-GGUF",
+                "Qwen3-1.7B-GGUF",
+                "Bonsai-8B-gguf",
+                "Gemma-4-E2B-it-GGUF",
+            ],
+            "expected only generation models, cheapest first"
+        );
+    }
+
+    /// The default ships in the light tier deliberately: measured private bytes for a
+    /// loaded Bonsai-8B were 1.93 GB, which this estimate (1.98 GB) tracks closely.
+    #[test]
+    fn the_light_tier_tracks_measured_memory_for_the_default_model() {
+        let models = select_from(REAL_PAYLOAD);
+        let bonsai = models
+            .iter()
+            .find(|m| m.id == "Bonsai-8B-gguf")
+            .expect("Bonsai should be offered");
+        assert!(
+            bonsai.light,
+            "Bonsai-8B is measured at 1.93 GB resident and must count as light, got {:?}",
+            bonsai
+        );
+        assert!(bonsai.estimated_ram_gb < LIGHT_MODEL_RAM_GB);
+
+        let gemma = models
+            .iter()
+            .find(|m| m.id == "Gemma-4-E2B-it-GGUF")
+            .expect("Gemma should be offered");
+        assert!(
+            !gemma.light,
+            "a 3.81 GB checkpoint cannot be in the under-2 GB tier: {gemma:?}"
+        );
+    }
+
+    #[test]
+    fn models_that_would_exceed_the_cap_are_not_offered() {
+        let json = r#"{"data":[
+            {"id":"Huge-70B","labels":["llamacpp"],"size":40.0,"downloaded":true},
+            {"id":"JustOver","labels":["llamacpp"],"size":5.2,"downloaded":true},
+            {"id":"JustUnder","labels":["llamacpp"],"size":5.0,"downloaded":true}
+        ]}"#;
+        let ids: Vec<String> = select_from(json).into_iter().map(|m| m.id).collect();
+        // 5.0 + 0.9 = 5.9 fits under 6.0; 5.2 + 0.9 = 6.1 does not.
+        assert_eq!(ids, vec!["JustUnder"], "the cap must be applied to the runtime estimate");
+    }
+
+    /// An unreported size cannot be checked against the cap, and showing it anyway
+    /// would turn the cap into a promise the app cannot keep.
+    #[test]
+    fn a_model_with_no_reported_size_is_not_offered() {
+        let json = r#"{"data":[{"id":"Mystery","labels":["llamacpp"],"downloaded":true}]}"#;
+        assert!(select_from(json).is_empty());
+    }
+
+    #[test]
+    fn a_model_that_is_not_downloaded_is_not_offered() {
+        let json = r#"{"data":[{"id":"NotHere","labels":["llamacpp"],"size":1.0,"downloaded":false}]}"#;
+        assert!(select_from(json).is_empty());
+    }
+
+    /// Lemonade labels vary in case across registry sources; the filter must not be
+    /// fooled into offering an embedding model as a chat model by capitalisation.
+    #[test]
+    fn label_matching_is_case_insensitive() {
+        let json = r#"{"data":[{"id":"Embed","labels":["Embeddings"],"size":0.1,"downloaded":true}]}"#;
+        assert!(select_from(json).is_empty());
+    }
+
+    #[test]
+    fn no_think_is_sent_only_to_the_family_that_implements_it() {
+        assert!(understands_no_think("Qwen3-0.6B-GGUF"));
+        assert!(understands_no_think("qwen3-1.7b-gguf"));
+        assert!(!understands_no_think("Bonsai-8B-gguf"));
+        assert!(!understands_no_think("Gemma-4-E2B-it-GGUF"));
     }
 }

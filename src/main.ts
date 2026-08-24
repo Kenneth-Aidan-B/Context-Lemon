@@ -4,6 +4,16 @@ import { listen } from "@tauri-apps/api/event";
 interface Config {
   folders: string[];
   lemonade_url: string;
+  chat_model: string;
+}
+
+// One generation model Lemonade has installed that fits under the memory cap.
+interface ChatModel {
+  id: string;
+  size_gb: number;
+  estimated_ram_gb: number;
+  light: boolean;
+  max_context_window: number | null;
 }
 
 interface IndexStatus {
@@ -56,6 +66,8 @@ const answerBox = document.querySelector<HTMLDivElement>("#answer-box")!;
 const answerText = document.querySelector<HTMLDivElement>("#answer-text")!;
 const sourcesBox = document.querySelector<HTMLDivElement>("#sources-box")!;
 const sourcesList = document.querySelector<HTMLUListElement>("#sources-list")!;
+const modelSelect = document.querySelector<HTMLSelectElement>("#model-select")!;
+const modelHintEl = document.querySelector<HTMLParagraphElement>("#model-hint")!;
 
 function appendInlineMarkup(parent: HTMLElement, text: string) {
   // Render only the two inline forms the local models use reliably. Building DOM
@@ -233,6 +245,102 @@ async function reportIndexLoadError() {
   }
 }
 
+// Grouped by whether a model leaves the machine comfortably usable, so "I want this
+// running in the background all day" is a choice you can make by reading one label
+// rather than by comparing gigabyte figures.
+function renderModelOptions(models: ChatModel[], selected: string) {
+  modelSelect.replaceChildren();
+
+  if (models.length === 0) {
+    const option = document.createElement("option");
+    option.textContent = "No installed model fits the 6 GB limit";
+    modelSelect.append(option);
+    modelSelect.disabled = true;
+    return;
+  }
+
+  const groups: [string, ChatModel[]][] = [
+    ["Runs light — under 2 GB", models.filter((m) => m.light)],
+    // "up to", not "under": the cap itself is inclusive, so a model estimated at
+    // exactly 6 GB is offered and the label has to say so.
+    ["Needs more room — up to 6 GB", models.filter((m) => !m.light)],
+  ];
+  for (const [label, group] of groups) {
+    if (group.length === 0) continue;
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = label;
+    for (const model of group) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = `${model.id} — ~${model.estimated_ram_gb.toFixed(2)} GB while running`;
+      optgroup.append(option);
+    }
+    modelSelect.append(optgroup);
+  }
+
+  // A model saved in config can disappear if it is uninstalled from Lemonade. Showing
+  // it as a dead entry beats silently answering with something the user did not pick.
+  if (!models.some((m) => m.id === selected)) {
+    const option = document.createElement("option");
+    option.value = selected;
+    option.textContent = `${selected} — not installed`;
+    option.disabled = true;
+    modelSelect.prepend(option);
+  }
+  modelSelect.value = selected;
+  modelSelect.disabled = false;
+}
+
+function renderModelHint(models: ChatModel[], selected: string) {
+  const model = models.find((m) => m.id === selected);
+  if (!model) {
+    modelHintEl.textContent = `${selected} is no longer installed in Lemonade — pick another model.`;
+    return;
+  }
+  const context = model.max_context_window
+    ? ` · ${Math.round(model.max_context_window / 1024)}K context`
+    : "";
+  const light = models.filter((m) => m.light).length;
+  modelHintEl.textContent =
+    `${model.size_gb.toFixed(2)} GB on disk · ~${model.estimated_ram_gb.toFixed(2)} GB while running` +
+    `${context}. ${light} of ${models.length} installed model(s) stay under 2 GB.`;
+}
+
+async function refreshModels() {
+  try {
+    const [models, config] = await Promise.all([
+      invoke<ChatModel[]>("list_chat_models"),
+      invoke<Config>("get_config"),
+    ]);
+    renderModelOptions(models, config.chat_model);
+    renderModelHint(models, config.chat_model);
+  } catch (err) {
+    modelSelect.replaceChildren();
+    modelSelect.disabled = true;
+    modelHintEl.textContent = `Could not list models: ${err}`;
+  }
+}
+
+modelSelect.addEventListener("change", async () => {
+  const model = modelSelect.value;
+  modelSelect.disabled = true;
+  modelHintEl.textContent = `Switching to ${model}…`;
+  try {
+    await invoke<Config>("set_chat_model", { model });
+    await refreshModels();
+    // Lemonade loads a newly selected model lazily, and a cold load of an 8B checkpoint
+    // measured ~38s here. Without saying so, that first wait sits behind an unexplained
+    // "Thinking…" and reads as the app having hung.
+    modelHintEl.textContent =
+      `Switched to ${model}. The first answer may take longer while Lemonade loads it.`;
+  } catch (err) {
+    // Re-read first so a rejected switch snaps the dropdown back to the model actually
+    // in use, and only then report why — refreshing afterwards would overwrite it.
+    await refreshModels();
+    modelHintEl.textContent = `Could not switch model: ${err}`;
+  }
+});
+
 addFolderBtn.addEventListener("click", () => {
   invoke("add_folder_dialog").catch((err) => {
     indexStatusEl.textContent = `Could not open folder picker: ${err}`;
@@ -331,3 +439,4 @@ async function checkLemonade() {
 refreshConfig();
 refreshIndexStatus().then(reportIndexLoadError);
 checkLemonade();
+refreshModels();

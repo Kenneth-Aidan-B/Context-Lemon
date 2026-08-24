@@ -46,6 +46,8 @@ pub fn run() {
             commands::index_folder_command,
             commands::ask_question,
             commands::check_lemonade,
+            commands::list_chat_models,
+            commands::set_chat_model,
         ])
         .setup(|app| {
             let show_i = MenuItem::with_id(app, "show", "Open", true, None::<&str>)?;

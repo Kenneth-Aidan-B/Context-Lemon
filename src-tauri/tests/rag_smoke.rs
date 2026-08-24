@@ -1,3 +1,4 @@
+use lemonade_context_engine_lib::lemonade::{self, LemonadeClient};
 use lemonade_context_engine_lib::rag;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
@@ -72,7 +73,7 @@ async fn known_answer_questions_are_grounded_with_citations() {
     ];
 
     for (question, expected_fact) in cases {
-        let response = rag::ask(&fixture.store, &fixture.client, question)
+        let response = rag::ask(&fixture.store, &fixture.client, question, rag::DEFAULT_CHAT_MODEL)
             .await
             .unwrap_or_else(|e| panic!("ask() failed for {question:?}: {e}"));
 
@@ -86,4 +87,61 @@ async fn known_answer_questions_are_grounded_with_citations() {
             response.answer
         );
     }
+}
+
+/// The model picker is only as trustworthy as its reading of what Lemonade actually
+/// sends, so this drives the real endpoint rather than a fixture. It guards the three
+/// promises the UI makes: nothing above the cap is offered, the "runs light" badge
+/// means what it says, and the embedding model the indexer depends on is never
+/// presented as something you can answer questions with.
+#[tokio::test]
+async fn installed_chat_models_are_listed_within_the_memory_cap() {
+    let client = LemonadeClient::new("http://localhost:13305/v1".to_string());
+    if !client.is_reachable().await {
+        eprintln!("SKIPPED: Lemonade server not reachable at localhost:13305");
+        return;
+    }
+
+    let models = client
+        .list_chat_models()
+        .await
+        .expect("listing installed models failed");
+    assert!(
+        !models.is_empty(),
+        "Lemonade is running but offered no chat model at all"
+    );
+
+    for model in &models {
+        assert!(
+            model.estimated_ram_gb <= lemonade::MAX_MODEL_RAM_GB,
+            "{} is estimated at {:.2} GB, over the {:.0} GB cap",
+            model.id,
+            model.estimated_ram_gb,
+            lemonade::MAX_MODEL_RAM_GB
+        );
+        assert_eq!(
+            model.light,
+            model.estimated_ram_gb < lemonade::LIGHT_MODEL_RAM_GB,
+            "the light badge on {} disagrees with its own estimate ({:.2} GB)",
+            model.id,
+            model.estimated_ram_gb
+        );
+        assert!(
+            !model.id.contains("nomic-embed"),
+            "the embedding model must never be selectable for chat"
+        );
+    }
+
+    // Sorted cheapest-first, so the models that leave the machine usable come first.
+    let ordered: Vec<f64> = models.iter().map(|m| m.estimated_ram_gb).collect();
+    let mut sorted = ordered.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(ordered, sorted, "models were not ordered by footprint");
+
+    assert!(
+        models.iter().any(|m| m.id == rag::DEFAULT_CHAT_MODEL),
+        "the default model {} is not installed in Lemonade, so a fresh install of this          app could not answer anything. Got: {:?}",
+        rag::DEFAULT_CHAT_MODEL,
+        models.iter().map(|m| &m.id).collect::<Vec<_>>()
+    );
 }

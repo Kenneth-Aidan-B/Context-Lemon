@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "lemonade-context-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "dirs 5.0.1",

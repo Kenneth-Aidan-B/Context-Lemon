@@ -10,11 +10,23 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const EMBEDDING_MODEL: &str = "nomic-embed-text-v1-GGUF";
-/// unsloth/Qwen3-0.6B-GGUF:Q4_0 — Q4_0 is llama.cpp's direct 4-bit (INT4) quant, no
-/// GPU required. Chosen over the 1.2B+ LFM2 family for footprint: it needs no extra
-/// download on a machine that already has it, and it's under half the size of
-/// Qwen3-1.7B-GGUF, which cuts both resident memory and cold-load time.
-pub const CHAT_MODEL: &str = "Qwen3-0.6B-GGUF";
+/// prism-ml/Bonsai-8B-gguf:Q1_0 — an 8B-class model whose checkpoint is 1.08 GB
+/// because it is natively low-bit rather than aggressively quantized after the fact,
+/// so it stays in the under-2 GB resident tier (measured: 1.93 GB) while answering like
+/// a model an order of magnitude larger than the 0.6B this replaced.
+///
+/// Chosen on measured grounding behaviour, which is what this app actually sells. On a
+/// multi-hop question over the bundled sample, Qwen3-0.6B recalled 6/7 facts, dropped
+/// the trigger condition from a failover timeline, and conflated Talon's cache *keying*
+/// with its *eviction* policy. Worse, asked "what encryption algorithm does Talon use"
+/// — a premise the corpus never states — it answered "SHA-256", inventing a security
+/// property from a hashing detail. Bonsai scored 7/7, reproduced the timeline in full,
+/// and correctly refused the loaded question. Refusing to answer what isn't in the
+/// corpus is the whole product, so that trade is worth the ~2.5x slower generation
+/// (~40 tok/s vs ~100 tok/s warm) — still comfortably faster than reading speed.
+///
+/// Only the *default*; users pick any installed model under the cap from the UI.
+pub const DEFAULT_CHAT_MODEL: &str = "Bonsai-8B-gguf";
 /// Verified against Lemonade directly (raw batch-size sweep): 64 embeds in ~1.7x the
 /// throughput of 32 with no change to the embeddings themselves, so this is a pure
 /// win. Concurrency (issuing several requests at once instead of raising this number)
@@ -454,7 +466,14 @@ pub struct AskResponse {
     pub sources: Vec<Source>,
 }
 
-pub async fn ask(store: &VectorStore, client: &LemonadeClient, question: &str) -> Result<AskResponse, String> {
+/// `chat_model` is the user's current pick rather than a constant, so switching models
+/// in the UI takes effect on the next question with no restart.
+pub async fn ask(
+    store: &VectorStore,
+    client: &LemonadeClient,
+    question: &str,
+    chat_model: &str,
+) -> Result<AskResponse, String> {
     let trimmed = question.trim();
     if trimmed.is_empty() {
         return Err("Question cannot be empty".to_string());
@@ -506,7 +525,7 @@ pub async fn ask(store: &VectorStore, client: &LemonadeClient, question: &str) -
         its own lines; do not compress the entire answer into one paragraph.";
     let user = format!("Context:\n{context}\nQuestion: {trimmed}");
 
-    let answer = client.chat(CHAT_MODEL, system, &user, true).await?;
+    let answer = client.chat(chat_model, system, &user).await?;
 
     Ok(AskResponse { answer, sources })
 }

@@ -1,7 +1,7 @@
 use crate::config::{self, Config, ConfigState};
 use crate::indexing::store::{path_key, VectorStore};
 use crate::jobs::IndexJobs;
-use crate::lemonade::LemonadeClient;
+use crate::lemonade::{ChatModel, LemonadeClient};
 use crate::rag::{self, AskResponse, IndexStats};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -102,9 +102,49 @@ pub async fn index_folder_command(
 pub async fn ask_question(
     store: State<'_, VectorStore>,
     client: State<'_, LemonadeClient>,
+    config_state: State<'_, ConfigState>,
     question: String,
 ) -> Result<AskResponse, String> {
-    rag::ask(&store, &client, &question).await
+    // Read the pick and release the lock before awaiting — holding a std Mutex across
+    // an await would let a slow answer block every other config reader.
+    let chat_model = { config_state.0.lock().unwrap().chat_model.clone() };
+    rag::ask(&store, &client, &question, &chat_model).await
+}
+
+/// The generation models installed in Lemonade that fit under the memory cap.
+#[tauri::command]
+pub async fn list_chat_models(client: State<'_, LemonadeClient>) -> Result<Vec<ChatModel>, String> {
+    client.list_chat_models().await
+}
+
+/// Switches the model used for answers, taking effect on the next question.
+///
+/// The requested model is checked against the same live list the picker is built from
+/// rather than trusted. Enforcing the cap only in the UI would make it a presentational
+/// detail, and a stale window could otherwise still select a model that has since been
+/// uninstalled — which would surface as a failed answer rather than a clear error.
+#[tauri::command]
+pub async fn set_chat_model(
+    config_state: State<'_, ConfigState>,
+    client: State<'_, LemonadeClient>,
+    model: String,
+) -> Result<Config, String> {
+    let available = client.list_chat_models().await?;
+    if !available.iter().any(|m| m.id == model) {
+        return Err(format!(
+            "{model} is not an installed model that fits the memory limit — pick one of: {}",
+            available
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let mut cfg = config_state.0.lock().unwrap();
+    cfg.chat_model = model;
+    config::save(&cfg).map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
 }
 
 #[tauri::command]

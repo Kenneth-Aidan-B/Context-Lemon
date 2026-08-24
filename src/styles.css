@@ -95,7 +95,8 @@ h2 {
 }
 
 input,
-button {
+button,
+select {
   border-radius: 8px;
   border: 1px solid transparent;
   padding: 0.6em 1.2em;
@@ -131,8 +132,27 @@ button:active {
 }
 
 #status-msg,
-#index-status {
+#index-status,
+.model-hint {
   opacity: 0.8;
+}
+
+#model-select {
+  /* The picker sits alone in its section, so let it use the full column rather than
+     shrink-wrapping to the longest model name and leaving a ragged right edge. */
+  width: 100%;
+  cursor: pointer;
+}
+
+#model-select:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.model-hint {
+  font-size: 0.85em;
+  margin-top: 0.6em;
+  margin-bottom: 0;
 }
 
 .ask-form {
@@ -277,9 +297,18 @@ button:active {
   }
 
   input,
-  button {
+  button,
+  select {
     color: #ffffff;
     background-color: #0f0f0f98;
+  }
+
+  /* Native option lists do not inherit the translucent field background, so give them
+     an opaque one or the popup renders as unreadable text on the desktop behind it. */
+  #model-select option,
+  #model-select optgroup {
+    color: #ffffff;
+    background-color: #1f1f1f;
   }
   button:active {
     background-color: #0f0f0f69;

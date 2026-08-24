@@ -1,6 +1,6 @@
 [package]
 name = "lemonade-context-engine"
-version = "0.2.0"
+version = "0.3.0"
 description = "A fully local folder-aware RAG and memory layer for AMD Lemonade"
 authors = ["Kenneth Aidan B"]
 edition = "2021"

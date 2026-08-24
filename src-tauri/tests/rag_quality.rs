@@ -36,6 +36,7 @@ async fn answers_are_attributed_to_the_file_that_contains_the_fact() {
         &fixture.store,
         &fixture.client,
         "After how many seconds with no heartbeat is a Nightingale node marked dead?",
+        rag::DEFAULT_CHAT_MODEL,
     )
     .await
     .expect("ask() failed");
@@ -65,6 +66,7 @@ async fn synthesises_facts_across_two_files() {
         &fixture.store,
         &fixture.client,
         "What is the Talon Cache's default budget per accelerator, and which build introduced it?",
+        rag::DEFAULT_CHAT_MODEL,
     )
     .await
     .expect("ask() failed");
@@ -94,6 +96,7 @@ async fn declines_when_the_answer_is_not_in_the_corpus() {
         &fixture.store,
         &fixture.client,
         "What was Project Nightingale's annual marketing budget in US dollars?",
+        rag::DEFAULT_CHAT_MODEL,
     )
     .await
     .expect("ask() failed");
@@ -158,6 +161,7 @@ async fn does_not_substitute_a_plausible_wrong_value() {
         &fixture.store,
         &fixture.client,
         "What port does the Nightingale gateway listen on by default?",
+        rag::DEFAULT_CHAT_MODEL,
     )
     .await
     .expect("ask() failed");
