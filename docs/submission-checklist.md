@@ -23,9 +23,12 @@ cargo test --test rag_smoke --locked -- --nocapture
 cargo test --test rag_quality --locked -- --nocapture
 ```
 
+A healthy run is 39 passing tests: 32 unit, 4 quality, 3 smoke, with the 4 benchmark
+tests correctly reported as ignored.
+
 Record the commit SHA and retain the full test output with the submission materials.
 
-## 2. Build `v0.1.0`
+## 2. Build the release
 
 Ensure these versions agree before tagging:
 
@@ -33,7 +36,11 @@ Ensure these versions agree before tagging:
 - `src-tauri/Cargo.toml` → `package.version`
 - `src-tauri/tauri.conf.json` → `version`
 
-Build the release artifacts:
+Build the release artifacts with the Tauri CLI. Do **not** run a bare
+`cargo build --release` alongside it: that rebuilds the binary outside the CLI's
+environment, so it points at the Vite dev server instead of embedding the frontend, and
+it silently overwrites the bundler's output. The symptom is a packaged app that opens to
+`localhost refused to connect`.
 
 ```powershell
 npm ci
@@ -49,11 +56,15 @@ src-tauri\target\release\bundle\nsis\*.exe
 ```
 
 If MSI or NSIS bundling is blocked, publish the standalone executable in a ZIP and
-name the archive `Context-Lemon-v0.1.0-windows-x64.zip`. Label it clearly as an
+name the archive `Context-Lemon-v0.3.0-windows-x64.zip`. Label it clearly as an
 unsigned preview; do not imply that an unsigned artifact is signed. Test the exact
 uploaded artifact on a second Windows account or machine.
 
-Create a `v0.1.0` release with:
+Launch the packaged executable before uploading it and confirm the interface renders.
+A build misconfigured to use the dev server looks byte-plausible and passes every test
+— it only fails when a human opens it.
+
+Create the release with:
 
 - a two-sentence product pitch;
 - supported Windows versions and CPU/GPU expectations;
@@ -86,7 +97,7 @@ On Ryzen AI or Radeon hardware, record:
 
 ```powershell
 lemonade backends
-lemonade bench Qwen3-0.6B-GGUF --scenarios chat
+lemonade bench Bonsai-8B-gguf --scenarios chat
 ```
 
 Then run the port question in Context-Lemon and record:
