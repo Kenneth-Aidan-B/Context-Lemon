@@ -147,15 +147,26 @@ a conversation — embedding, transcription and reranking models are filtered ou
 that are estimated to need at most **6 GB** while loaded. They are grouped by whether
 they stay under **2 GB**, the tier you can leave running alongside everything else.
 
-That estimate is the checkpoint size Lemonade reports plus a 0.9 GB allowance for KV
-cache and compute buffers, measured on the reference machine as the `llama-server`
-process's private bytes minus the checkpoint size, at `ctx_size` 4096:
+That estimate is the checkpoint size Lemonade reports plus a 0.6 GB allowance for KV
+cache and compute buffers. The allowance is measured as GPU memory directly — unload
+everything, read the card's used bytes as a baseline, load one model, take the delta —
+at `ctx_size` 4096:
 
-| Model | Checkpoint | Measured resident | Estimate |
+| Model | Checkpoint | Measured VRAM | Estimate |
 | --- | --- | --- | --- |
-| `nomic-embed-text-v1-GGUF` | 0.07 GB | 0.17 GB | not offered (embeddings) |
-| `Qwen3-0.6B-GGUF` | 0.36 GB | 1.05 GB | 1.26 GB |
-| `Bonsai-8B-gguf` | 1.08 GB | 1.93 GB | 1.98 GB |
+| `Qwen3-0.6B-GGUF` | 0.36 GB | 0.83 GB | 0.96 GB |
+| `Qwen3-1.7B-GGUF` | 0.98 GB | 1.47 GB | 1.58 GB |
+| `Bonsai-8B-gguf` | 1.08 GB | 1.66 GB | 1.68 GB |
+| `Gemma-4-E2B-it-GGUF` | 3.81 GB | 3.17 GB | 4.41 GB |
+
+Every estimate lands at or above what the model actually takes, which is the safe
+direction: it may withhold a model that would have fit, but it never offers one that
+will not. `Gemma-4-E2B-it-GGUF` shows the widest gap because its reported 3.81 GB covers
+an `mmproj` vision projector that a text chat never loads — the estimate stays
+conservative rather than guessing which components a request will touch.
+
+The figure is GPU memory because that is the binding constraint on the reference
+machine. On a CPU-only backend the same cost lands in system RAM instead.
 
 A model whose size Lemonade does not report is not offered at all, because a limit that
 cannot be checked is not a limit.
@@ -292,19 +303,22 @@ Local state is stored under:
 
 Context-Lemon contains no device-specific inference code. Lemonade selects its own
 CPU, GPU, or NPU backend; the application uses the same local HTTP API in every case.
-The default `Bonsai-8B-gguf` model was chosen to stay under 2 GB while loaded, so it
-remains usable on machines without a discrete GPU — see [Choosing a
-model](#choosing-a-model).
+The default `Bonsai-8B-gguf` model was chosen to stay under 2 GB while loaded, which
+keeps it viable on modest hardware rather than only on the card it was developed
+against — see [Choosing a model](#choosing-a-model).
 
-Reference development machine, as reported by Lemonade's own `system-info`:
+Reference development machine:
 
 | Spec | Value |
 | --- | --- |
 | CPU | Intel Core i7-13620H, 10 cores / 16 threads |
 | RAM | 16 GB |
-| Discrete GPU | None detected |
-| NPU | None detected |
-| Backend chosen by Lemonade | Integrated GPU (both models report `device: gpu`) |
+| GPU | NVIDIA GeForce RTX 3050 Laptop, 6 GB VRAM |
+| NPU | None |
+| Backend chosen by Lemonade | llama.cpp Vulkan, resident on the RTX 3050 |
+
+The 6 GB model cap is not arbitrary: it is the VRAM on this card, and the point at which
+a model stops fitting alongside everything else the GPU is doing.
 
 Generation measured over five streamed runs each, after a warm-up request, timing the
 first visible token separately from the tokens that follow:
@@ -315,19 +329,24 @@ first visible token separately from the tokens that follow:
 | `Qwen3-0.6B-GGUF` | 137–153 ms | 115–136 tok/s |
 
 The smaller model generates roughly 2.7x faster; the default trades that for the
-grounding behaviour described in [Choosing a model](#choosing-a-model). Both stay well
-ahead of reading speed on a laptop with no discrete accelerator — Lemonade placed them
-on the integrated GPU without any hint from this application, which is the portability
-argument in practice rather than in principle.
+grounding behaviour described in [Choosing a model](#choosing-a-model). Lemonade placed
+both on the discrete GPU without any hint from this application, which is the
+portability argument in practice rather than in principle.
+
+One caveat for anyone reading Lemonade's `system-info` output: its `devices.nvidia_gpu`
+entry reports "No NVIDIA discrete GPU found" on this machine even though the card is
+present and holding the model. That field tracks CUDA backend availability rather than
+physical hardware — these models reach the RTX 3050 through the Vulkan backend, which
+`system-info` does not attribute back to the card.
 
 Time to first token is measured with reasoning suppressed, which is how the application
 issues the request. Left enabled, `Qwen3-0.6B-GGUF` spends roughly 3 seconds reasoning
 before emitting any visible text — the reason the `/no_think` control token is sent to
 that family.
 
-These figures describe one development machine with no discrete GPU or NPU, and are not
-presented as AMD hardware results. Actual performance depends on the model, the Lemonade
-backend, and the device.
+These figures describe one development machine with an NVIDIA GPU and no NPU, and are
+explicitly not presented as AMD hardware results. Actual performance depends on the
+model, the Lemonade backend, and the device.
 
 ## Build from source
 

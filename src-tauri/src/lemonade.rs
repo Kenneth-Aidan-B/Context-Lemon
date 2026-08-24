@@ -9,14 +9,19 @@ pub struct LemonadeClient {
 
 /// A running model needs room for its KV cache and compute buffers on top of the
 /// weights Lemonade reports, so the checkpoint size alone understates what picking a
-/// model actually costs the machine.
+/// model actually costs.
 ///
-/// Measured on the reference machine (i7-13620H, llama.cpp backend, ctx_size 4096) as
-/// the llama-server process's private bytes minus the reported checkpoint size:
-/// nomic-embed-text +0.10 GB, Qwen3-0.6B +0.69 GB, Bonsai-8B +0.85 GB. Rounded up from
-/// the worst case so the estimate errs high — promising a model will fit and then
-/// thrashing is far worse than being slightly pessimistic.
-const RUNTIME_OVERHEAD_GB: f64 = 0.9;
+/// Measured directly as GPU memory, by unloading everything, reading the card's used
+/// bytes as a baseline, loading one model and taking the delta (llama.cpp Vulkan
+/// backend, ctx_size 4096): Qwen3-0.6B +0.47 GB, Qwen3-1.7B +0.49 GB, Bonsai-8B
+/// +0.58 GB. Rounded up from the worst case so the estimate errs high — promising a
+/// model will fit and then thrashing is far worse than being slightly pessimistic.
+///
+/// Deliberately *not* derived from the host process's private bytes. Those run ~0.9 GB
+/// above the checkpoint, but on a GPU backend the weights are counted twice that way —
+/// once mapped in host memory and once resident on the card — which overstates the real
+/// constraint. On a CPU-only backend the same cost simply lands in system RAM instead.
+const RUNTIME_OVERHEAD_GB: f64 = 0.6;
 
 /// The ceiling a model may be estimated to occupy at runtime and still be offered.
 /// Above this the app would be handing users a choice that stalls their machine.
@@ -68,6 +73,13 @@ struct ModelsResponse {
 pub struct ChatModel {
     pub id: String,
     /// Weights on disk, in GB, exactly as Lemonade reports them.
+    ///
+    /// For a model with several checkpoint components this covers all of them, which
+    /// can overstate what a chat actually loads — `Gemma-4-E2B-it-GGUF` reports 3.81 GB
+    /// including an `mmproj` vision projector, but measures 3.17 GB resident for text.
+    /// The estimate below is therefore conservative for multi-component models, which
+    /// is the safe direction: it may withhold a model that would have fit, but it never
+    /// offers one that will not.
     pub size_gb: f64,
     /// `size_gb` plus the measured runtime allowance — what to expect it to cost while
     /// loaded, which is the number that actually matters when choosing.
@@ -536,8 +548,8 @@ mod tests {
         );
     }
 
-    /// The default ships in the light tier deliberately: measured private bytes for a
-    /// loaded Bonsai-8B were 1.93 GB, which this estimate (1.98 GB) tracks closely.
+    /// The default ships in the light tier deliberately: a loaded Bonsai-8B measures
+    /// 1.66 GB of GPU memory, which this estimate (1.68 GB) tracks to within 20 MB.
     #[test]
     fn the_light_tier_tracks_measured_memory_for_the_default_model() {
         let models = select_from(REAL_PAYLOAD);
@@ -547,7 +559,7 @@ mod tests {
             .expect("Bonsai should be offered");
         assert!(
             bonsai.light,
-            "Bonsai-8B is measured at 1.93 GB resident and must count as light, got {:?}",
+            "Bonsai-8B is measured at 1.66 GB of GPU memory and must count as light, got {:?}",
             bonsai
         );
         assert!(bonsai.estimated_ram_gb < LIGHT_MODEL_RAM_GB);
@@ -566,11 +578,11 @@ mod tests {
     fn models_that_would_exceed_the_cap_are_not_offered() {
         let json = r#"{"data":[
             {"id":"Huge-70B","labels":["llamacpp"],"size":40.0,"downloaded":true},
-            {"id":"JustOver","labels":["llamacpp"],"size":5.2,"downloaded":true},
-            {"id":"JustUnder","labels":["llamacpp"],"size":5.0,"downloaded":true}
+            {"id":"JustOver","labels":["llamacpp"],"size":5.5,"downloaded":true},
+            {"id":"JustUnder","labels":["llamacpp"],"size":5.4,"downloaded":true}
         ]}"#;
         let ids: Vec<String> = select_from(json).into_iter().map(|m| m.id).collect();
-        // 5.0 + 0.9 = 5.9 fits under 6.0; 5.2 + 0.9 = 6.1 does not.
+        // 5.4 + 0.6 = 6.0 is exactly at the inclusive cap; 5.5 + 0.6 = 6.1 is over it.
         assert_eq!(ids, vec!["JustUnder"], "the cap must be applied to the runtime estimate");
     }
 

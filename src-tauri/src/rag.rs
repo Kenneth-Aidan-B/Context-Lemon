@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const EMBEDDING_MODEL: &str = "nomic-embed-text-v1-GGUF";
 /// prism-ml/Bonsai-8B-gguf:Q1_0 — an 8B-class model whose checkpoint is 1.08 GB
 /// because it is natively low-bit rather than aggressively quantized after the fact,
-/// so it stays in the under-2 GB resident tier (measured: 1.93 GB) while answering like
+/// so it stays in the under-2 GB tier (measured: 1.66 GB of VRAM) while answering like
 /// a model an order of magnitude larger than the 0.6B this replaced.
 ///
 /// Chosen on measured grounding behaviour, which is what this app actually sells. On a
